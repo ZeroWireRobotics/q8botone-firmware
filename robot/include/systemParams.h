@@ -1,4 +1,4 @@
-#include <arduino.h>
+#include <Arduino.h>
 
 // ESP-NOW Messaging Types
 enum MsgType : uint8_t{
