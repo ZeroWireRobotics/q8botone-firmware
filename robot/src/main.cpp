@@ -12,6 +12,8 @@
 #include "systemParams.h"
 #include "pinMapping.h"
 #include "macStorage.h"
+#include "powerManager.h"
+#include "RGBManager.h"
 
 // Initialize global objects
 esp_now_peer_info_t peerInfo;
@@ -20,6 +22,8 @@ Dynamixel2Arduino       q8dxl(ser, DXL_DIR_PIN);
 q8Dynamixel             q8(q8dxl);
 bool started = false;  // Track robot start state
 macStorage storage;
+PowerManager            power(LATCH_PIN, SENSE_PIN, LED_PIN);
+RGBManager              rgb(RGB_PIN);
 
 // FreeRTOS Handles
 QueueHandle_t rxQueue = NULL;
@@ -302,6 +306,7 @@ void robotStateTask(void* parameter) {
   TickType_t lastStateChange = xTaskGetTickCount();
   unsigned long lastActivity = 0;
   bool firstRun = true;  // Check saved MAC on first iteration
+  uint16_t hue = 0;      // Tracks rainbow position for STATE_UNPAIRED
 
   // Give other tasks time to start (especially serialOutputTask)
   vTaskDelay(pdMS_TO_TICKS(100));
@@ -330,6 +335,10 @@ void robotStateTask(void* parameter) {
 
     switch (currentState) {
       case STATE_UNPAIRED: {
+        // Rainbow cycle on RGB LED every loop tick (~100ms per step)
+        rgb.setHue(hue);
+        hue += 512;  // Full cycle in ~13s
+
         // Slow blink every 2 seconds
         if (now - lastActivity >= 2000) {
           lastActivity = now;
@@ -342,6 +351,9 @@ void robotStateTask(void* parameter) {
       }
 
       case STATE_PAIRED: {
+        // Solid blue on RGB LED (waiting for torque enable)
+        rgb.setColor(0, 0, 255);
+
         // Double blink every 2 seconds (waiting for torque enable)
         if (now - lastActivity >= 2000) {
           lastActivity = now;
@@ -367,6 +379,9 @@ void robotStateTask(void* parameter) {
       }
 
       case STATE_STARTED: {
+        // Solid green on RGB LED (running)
+        rgb.setColor(0, 255, 0);
+
         // Breathing LED pattern every 10 seconds
         if (now - lastActivity >= 10000) {
           lastActivity = now;
@@ -433,7 +448,13 @@ void serialOutputTask(void* parameter) {
 void setup() {
   Serial.begin(115200);
   pinMode(LED_PIN, OUTPUT);
-  // delay(2000);  // Useful for debugging
+
+  // Power latch — must run before anything else
+  while (!power.begin()) {
+    // Serial.println("[POWER] Button released early - hold for 3s to power on");
+  }
+  Serial.println("[POWER] Latched on");
+  rgb.begin();
 
   bool initSuccess = true;
 
@@ -544,6 +565,9 @@ void setup() {
   } else{
     Serial.println("[ROBOT] MAX17043 NOT found. Continuing\n");
   }
+
+  // Start power button monitor task (must be after all xTaskCreate calls)
+  power.startMonitorTask();
 
   // Initialize Dynamixel object
   q8.begin();
