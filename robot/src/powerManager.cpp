@@ -43,6 +43,11 @@ bool PowerManager::begin() {
   return true;
 }
 
+void PowerManager::powerOff() {
+  analogWrite(_ledPin, 0);
+  digitalWrite(_latchPin, LOW);
+}
+
 void PowerManager::startMonitorTask() {
   xTaskCreate(_monitorTask, "PowerMonitor", 2048, this, 2, NULL);
 }

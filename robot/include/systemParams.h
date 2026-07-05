@@ -34,10 +34,6 @@ size_t masterSize;
 size_t smallerSize = 4;
 uint16_t* rData = nullptr;
 
-// MAX17043 Variables
-float raw;
-char intStr[10];
-
 // ESP-Now Comms
 bool incoming = false;
 PairingMessage pairingData;
@@ -51,6 +47,9 @@ uint8_t serverMac[6];  // This us. The robot is the server.
 // Heartbeat tracking (robot side)
 unsigned long lastHeartbeatReceived = 0;
 const unsigned long HEARTBEAT_TIMEOUT_ROBOT = 5000;  // Unpair after 20s no heartbeat from controller
+
+// Last DATA message received — used to guard battery reads from motor-load noise
+unsigned long lastDataReceived = 0;
 
 // Debug mode
 bool debugMode = false;

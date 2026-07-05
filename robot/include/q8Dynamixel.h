@@ -30,6 +30,7 @@ class q8Dynamixel
     void bulkWrite(int32_t values[8]);
     uint16_t* syncRead();
     void jump();
+    void setJumpEnabled(bool enabled);
     uint8_t parseData(const char* myData);
 
   private:
@@ -55,13 +56,14 @@ class q8Dynamixel
     uint16_t _prevProfile;
     bool _torqueFlag = false;
     bool _prevTorqueFlag = false;
+    bool _jumpEnabled = true;
     uint8_t _specialCmd = 0;
     int32_t _deg2Dxl(float deg);
     float _dxl2Deg(int32_t dxlRaw);
     void expandArrays();
     const float _idlePos[2]   = {30, 150};
     int32_t _idleArray[8];
-    const float _jumpLow[2]   = {-40, 220};
+    const float _jumpLow[2]   = {-90, 270};
     int32_t _lowArray[8];
     const float _jumpHigh[2] = {90, 90};
     int32_t _highArray[8];

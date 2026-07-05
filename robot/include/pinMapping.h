@@ -1,7 +1,7 @@
 #include <Arduino.h>
 
 // DYNAMIXEL TTL Comms pins
-const uint8_t DXL_DIR_PIN = 9;
+const uint8_t DXL_DIR_PIN = 5;
 
 // Chip LED
 const uint8_t LED_PIN = 4;

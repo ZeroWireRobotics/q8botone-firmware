@@ -168,6 +168,10 @@ uint16_t* q8Dynamixel::syncRead(){
   return byteArray;
 }
 
+void q8Dynamixel::setJumpEnabled(bool enabled) {
+  _jumpEnabled = enabled;
+}
+
 void q8Dynamixel::jump(){
   // Crouching Position
   setProfile(500);
@@ -182,7 +186,7 @@ void q8Dynamixel::jump(){
   bulkWrite(_highArray);
   delay(100);
   bulkWrite(_restArray);
-  delay(5000);
+  delay(2000);
 
   // Back to idle
   setProfile(500);
@@ -211,7 +215,7 @@ uint8_t q8Dynamixel::parseData(const char* myData) {
     } else if (_specialCmd == 3){    // Send recorded
       return 3;
     } else if (_specialCmd == 4){    // Jump
-      jump();
+      if (_jumpEnabled) jump();
       return 0;
     }
   }

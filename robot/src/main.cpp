@@ -4,8 +4,6 @@
 #include <esp_now.h>
 #include <Wire.h>
 #include <Dynamixel2Arduino.h>
-#include <MAX17043.h>
-
 // Q8bot-specific Modules
 #include "q8Dynamixel.h"
 #include "userParams.h"
@@ -14,6 +12,7 @@
 #include "macStorage.h"
 #include "powerManager.h"
 #include "RGBManager.h"
+#include "battery.h"
 
 // Initialize global objects
 esp_now_peer_info_t peerInfo;
@@ -71,21 +70,6 @@ void unpair() {
   xEventGroupSetBits(eventGroup, EVENT_UNPAIRED);
 }
 
-void displayReading()
-{
-  // MAX17043 Demo code. Used once and good for debugging
-  Serial.println("Device Reading:");
-  // Serial.print("Address:       0x"); Serial.println(FuelGauge.address(), HEX);
-  // Serial.print("Version:       "); Serial.println(FuelGauge.version());
-  // Serial.print("ADC:           "); Serial.println(FuelGauge.adc());
-  Serial.print("Voltage:       "); Serial.print(FuelGauge.voltage()); Serial.println(" mV");
-  Serial.print("Percent:       "); Serial.print(FuelGauge.percent()); Serial.println("%");
-  // Serial.print("Is Sleeping:   "); Serial.println(FuelGauge.isSleeping() ? "Yes" : "No");
-  // Serial.print("Alert:         "); Serial.println(FuelGauge.alertIsActive() ? "Yes" : "No");
-  // Serial.print("Threshold:     "); Serial.print(FuelGauge.getThreshold()); Serial.println("%");
-  // Serial.print("Compensation:  0x"); Serial.println(FuelGauge.compensation(), HEX);
-  Serial.println();
-}
 
 void addElementToArray(uint16_t*& array, size_t& currentSize, uint16_t newElement) {
     // Allocate a new array with one extra element
@@ -179,6 +163,7 @@ void espnowRxTask(void* parameter) {
         if (msg.len < sizeof(CharMessage)) continue;
 
         lastHeartbeatReceived = millis();  // Any DATA also counts as "alive"
+        lastDataReceived = millis();
         memcpy(&theirMsg, msg.data, sizeof(theirMsg));
         uint8_t result = q8.parseData(theirMsg.data);
 
@@ -194,7 +179,7 @@ void espnowRxTask(void* parameter) {
             case 1: {
               // Send battery level
               queuePrint(MSG_DEBUG, "[DATA] Send battery level\n");
-              myMsg.data[0] = (uint16_t)FuelGauge.percent();
+              myMsg.data[0] = batteryGetPercent();
               esp_now_send(clientMac, (uint8_t*)&myMsg, sizeof(myMsg));
               break;
             }
@@ -308,6 +293,11 @@ void robotStateTask(void* parameter) {
   bool firstRun = true;  // Check saved MAC on first iteration
   uint16_t hue = 0;      // Tracks rainbow position for STATE_UNPAIRED
 
+  // Battery monitoring state
+  // Stages: 3 = normal, 2 = low (<20%), 1 = critical (<10%), 0 = stop (<5%)
+  uint8_t batteryStage = 3;
+  unsigned long lastBatteryCheck = 0;
+
   // Give other tasks time to start (especially serialOutputTask)
   vTaskDelay(pdMS_TO_TICKS(100));
 
@@ -332,6 +322,38 @@ void robotStateTask(void* parameter) {
 
     unsigned long now = millis();
     RobotState currentState = robotState;
+
+    // Battery check: every 30s, but only when commands have been quiet for 5s
+    // (avoids reading under motor load or during a jump sequence)
+    if (now - lastBatteryCheck >= 30000 && now - lastDataReceived >= 5000) {
+      lastBatteryCheck = now;
+      uint16_t pct = batteryGetPercent();
+      queuePrint(MSG_DEBUG, "[BATTERY] %d%%\n", pct);
+
+      uint8_t newStage;
+      if      (pct >= 20) newStage = 3;
+      else if (pct >= 10) newStage = 2;
+      else if (pct >= 5)  newStage = 1;
+      else                newStage = 0;
+
+      if (newStage < batteryStage) {
+        batteryStage = newStage;
+        switch (batteryStage) {
+          case 2:
+            q8.setJumpEnabled(false);
+            queuePrint(MSG_INFO, "[BATTERY] Low battery (%d%%) - jumping disabled\n", pct);
+            break;
+          case 1:
+            queuePrint(MSG_INFO, "[BATTERY] Critical battery (%d%%) - reduce activity\n", pct);
+            break;
+          case 0:
+            queuePrint(MSG_INFO, "[BATTERY] Battery cutoff (%d%%) - powering off\n", pct);
+            vTaskDelay(pdMS_TO_TICKS(500));  // Let the message flush before cutting power
+            power.powerOff();
+            break;
+        }
+      }
+    }
 
     switch (currentState) {
       case STATE_UNPAIRED: {
@@ -555,16 +577,9 @@ void setup() {
   }
   esp_now_register_recv_cb(onRecv);  // Set up callback when data is received.
 
-  // MAX17043 Init
-  if (FuelGauge.begin()){
-    FuelGauge.reset(); // Reset the device.
-    delay(250);
-    FuelGauge.quickstart();
-    delay(125);
-    displayReading(); // Display an initial reading.
-  } else{
-    Serial.println("[ROBOT] MAX17043 NOT found. Continuing\n");
-  }
+  // BQ25887 Init
+  Wire.begin();
+  batteryInit();
 
   // Start power button monitor task (must be after all xTaskCreate calls)
   power.startMonitorTask();

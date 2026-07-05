@@ -28,6 +28,9 @@ public:
   // Spawn the shutdown-monitor task. Call after xTaskCreate calls in setup().
   void startMonitorTask();
 
+  // Cut power immediately (e.g. triggered by SW battery cutoff).
+  void powerOff();
+
 private:
   uint8_t _latchPin;
   uint8_t _sensePin;
