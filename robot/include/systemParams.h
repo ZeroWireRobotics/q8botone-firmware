@@ -6,9 +6,14 @@ enum MsgType : uint8_t{
   DATA,
   HEARTBEAT,
 };
+enum DeviceRole : uint8_t {
+  ROLE_CONTROLLER = 0,
+  ROLE_ROBOT      = 1,
+};
 struct PairingMessage{
   uint8_t msgType = PAIRING;
   uint8_t id;
+  uint8_t role;
   uint8_t macAddr[6];
   uint8_t channel;
 };

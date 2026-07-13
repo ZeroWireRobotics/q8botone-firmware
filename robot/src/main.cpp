@@ -124,13 +124,18 @@ void espnowRxTask(void* parameter) {
         if (msg.len < sizeof(PairingMessage)) continue;
 
         memcpy(&pairingData, msg.data, sizeof(pairingData));
+
+        // Ignore pairing requests from other robots
+        if (pairingData.role != ROLE_CONTROLLER) continue;
+
         queuePrint(MSG_DEBUG, "[PAIRING] Pairing request from: %02X:%02X:%02X:%02X:%02X:%02X\n",
                    msg.mac[0], msg.mac[1], msg.mac[2], msg.mac[3], msg.mac[4], msg.mac[5]);
 
         memcpy(clientMac, msg.mac, 6);
         WiFi.softAPmacAddress(pairingData.macAddr);  // Overwrite with our own MAC
         pairingData.channel = chan;
-        pairingData.id = 0;  // Server is ID 0
+        pairingData.id = 0;   // Server is ID 0
+        pairingData.role = ROLE_ROBOT;
         addPeer(clientMac);
         esp_now_send(clientMac, (uint8_t*)&pairingData, sizeof(pairingData));
         paired = true;

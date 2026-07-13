@@ -133,11 +133,15 @@ void espnowRxTask(void *param) {
     if (xQueueReceive(rxQueue, &msg, portMAX_DELAY) == pdTRUE) {
 
       // Process based on message type
-      if (msg.data[0] == PAIRING) {
+      if (msg.data[0] == PAIRING && !paired) {
         // Validate PAIRING message length
         if (msg.len < sizeof(PairingMessage)) continue;
 
         memcpy(&pairingData, msg.data, sizeof(PairingMessage));
+
+        // Ignore pairing responses from other controllers
+        if (pairingData.role != ROLE_ROBOT) continue;
+
         queuePrint(MSG_DEBUG, "[PAIRING] Paired with server: %02X:%02X:%02X:%02X:%02X:%02X\n",
                    msg.mac[0], msg.mac[1], msg.mac[2], msg.mac[3], msg.mac[4], msg.mac[5]);
 
@@ -278,6 +282,7 @@ void pairingTask(void *param) {
       PairingMessage pairingMsg;
       pairingMsg.msgType = PAIRING;
       pairingMsg.id = 1;
+      pairingMsg.role = ROLE_CONTROLLER;
       memcpy(pairingMsg.macAddr, clientMac, 6);
       pairingMsg.channel = chan;
 
