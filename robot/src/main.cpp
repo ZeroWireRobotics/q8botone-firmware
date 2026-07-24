@@ -306,6 +306,11 @@ void robotStateTask(void* parameter) {
   // Give other tasks time to start (especially serialOutputTask)
   vTaskDelay(pdMS_TO_TICKS(100));
 
+  // Backup demo cycle: each double-tap (while torque is off) runs exactly
+  // one of these, advancing to the next for the following double-tap.
+  const uint8_t BACKUP_DEMO_COUNT = 3;
+  uint8_t backupDemoIndex = 0;
+
   while (true) {
     // On first run, check for saved MAC address
     if (firstRun) {
@@ -327,6 +332,39 @@ void robotStateTask(void* parameter) {
 
     unsigned long now = millis();
     RobotState currentState = robotState;
+
+    // Backup demo trigger: double-tap the power button while torque is off
+    // (i.e. no host is actively driving the robot) to run exactly one demo
+    // move, cycling to the next on each subsequent double-tap. Ignored
+    // entirely if a host is connected, so it can never fight a live
+    // teleop session.
+    if (power.consumeDoubleTap() && !q8.isTorqueOn()) {
+      q8.toggleTorque(true);
+      q8.resetTorqueState(true);
+      q8.moveToIdle(500);
+      delay(600);       // let the move-to-neutral finish before the demo move
+
+      switch (backupDemoIndex) {
+        case 0:
+          queuePrint(MSG_INFO, "[BACKUP DEMO] Double-tap detected, torque off - trotting\n");
+          q8.trotDemo();
+          break;
+        case 1:
+          queuePrint(MSG_INFO, "[BACKUP DEMO] Double-tap detected, torque off - jumping\n");
+          q8.jump();
+          break;
+        case 2:
+          queuePrint(MSG_INFO, "[BACKUP DEMO] Double-tap detected, torque off - greeting\n");
+          q8.greet();
+          break;
+      }
+      backupDemoIndex = (backupDemoIndex + 1) % BACKUP_DEMO_COUNT;
+
+      q8.moveToIdle(500);
+      delay(600);
+      q8.toggleTorque(false);
+      q8.resetTorqueState(false);
+    }
 
     // Battery check: every 30s, but only when commands have been quiet for 5s
     // (avoids reading under motor load or during a jump sequence)
@@ -591,6 +629,7 @@ void setup() {
 
   // Initialize Dynamixel object
   q8.begin();
+  q8.attachRGB(&rgb);
 }
 
 // Loop does nothing - all work done in FreeRTOS tasks

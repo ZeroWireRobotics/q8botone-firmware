@@ -31,6 +31,10 @@ public:
   // Cut power immediately (e.g. triggered by SW battery cutoff).
   void powerOff();
 
+  // Test-and-clear a pending double-tap gesture (two quick taps within
+  // DOUBLE_TAP_WINDOW_MS). Polled by robotStateTask.
+  bool consumeDoubleTap();
+
 private:
   uint8_t _latchPin;
   uint8_t _sensePin;
@@ -38,6 +42,11 @@ private:
 
   static const uint32_t HOLD_MS    = 3000;
   static const uint32_t POLL_MS    = 20;
+  static const uint32_t DOUBLE_TAP_WINDOW_MS = 500;  // max gap between two taps
+  static const uint32_t MAX_TAP_MS = 300;            // press duration that counts as a "tap"
+
+  volatile bool _doubleTapPending = false;
+  volatile uint32_t _lastTapReleaseTime = 0;
 
   static void _monitorTask(void* param);
 };

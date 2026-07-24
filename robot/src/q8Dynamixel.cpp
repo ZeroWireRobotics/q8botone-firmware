@@ -7,6 +7,7 @@
 #include <Arduino.h>
 #include <Dynamixel2Arduino.h>
 #include <q8Dynamixel.h>
+#include <RGBManager.h>
 
 using namespace ControlTableItem;
 
@@ -14,6 +15,10 @@ using namespace ControlTableItem;
 q8Dynamixel::q8Dynamixel(Dynamixel2Arduino& dxl) : _dxl(dxl) {
   // Constructor implementation
   // Initialize any other members if needed
+}
+
+void q8Dynamixel::attachRGB(RGBManager* rgb){
+  _rgb = rgb;
 }
 
 void q8Dynamixel::begin(){
@@ -86,10 +91,14 @@ void q8Dynamixel::toggleTorque(bool flag){
   }
 }
 
-void q8Dynamixel::resetTorqueState(){
-  // Reset the internal torque flag to match disabled state
+void q8Dynamixel::resetTorqueState(bool torqueOn){
+  // Reset the internal torque flag to match the given hardware state
   // Used after connection loss when torque was already disabled
-  _torqueFlag = false;
+  _torqueFlag = torqueOn;
+}
+
+bool q8Dynamixel::isTorqueOn() const{
+  return _torqueFlag;
 }
 
 void q8Dynamixel::setOpMode(){
@@ -142,6 +151,20 @@ void q8Dynamixel::bulkWrite(int32_t values[8]){
   _dxl.bulkWrite(&_bw_infos);
 }
 
+void q8Dynamixel::bulkWriteDeg(const float degs[8]){
+  int32_t ticks[8];
+  for (int i = 0; i < 8; i++){
+    ticks[i] = _deg2Dxl(degs[i]);
+  }
+  bulkWrite(ticks);
+}
+
+void q8Dynamixel::moveToIdle(uint16_t dur){
+  setProfile(dur);
+  delay(100);
+  bulkWrite(_idleArray);
+}
+
 uint16_t* q8Dynamixel::syncRead(){
   // Read relevant registers from all joints into a single array
   int recv_cnt;
@@ -173,6 +196,10 @@ void q8Dynamixel::setJumpEnabled(bool enabled) {
 }
 
 void q8Dynamixel::jump(){
+  // Dim the RGB LED for the duration of the jump - one less simultaneous
+  // current draw during the biggest current spike this robot ever makes.
+  if (_rgb) _rgb->off();
+
   // Crouching Position
   setProfile(500);
   delay(100);
@@ -194,6 +221,151 @@ void q8Dynamixel::jump(){
   bulkWrite(_idleArray);
   delay(1000);
   _prevProfile = 500;
+}
+
+void q8Dynamixel::greet(){
+  // Scripted via-point greeting sequence (ported from routine_generator.py's greet()).
+  static const float G1[8] = {-90, 45, -90, 45, -90, 45, -90, 45};
+  static const float G2[8] = {0, 45, 0, 45, 0, 45, 0, 45};
+  static const float G3[8] = {-45, 45, -45, 45, 50, 75, 50, 75};
+  static const float G4[8] = {45, 90, -45, 45, 50, 75, 50, 75};
+  static const float G5[8] = {-45, 45, 45, 90, 50, 75, 50, 75};
+  static const float G6[8] = {-90, 45, -90, 45, -90, 45, -90, 45};
+
+  setProfile(1000);
+  delay(100);
+  bulkWriteDeg(G1);
+  delay(1100);
+  bulkWriteDeg(G2);
+  delay(1000);
+
+  setProfile(500);
+  delay(100);
+  bulkWriteDeg(G3);
+  delay(1000);
+
+  setProfile(200);
+  delay(100);
+  for (int i = 0; i < 3; i++){
+    bulkWriteDeg(G4);
+    delay(250);
+    bulkWriteDeg(G5);
+    delay(250);
+  }
+  delay(750);
+
+  setProfile(500);
+  delay(100);
+  bulkWriteDeg(G6);
+  delay(700);
+}
+
+void q8Dynamixel::_playFrames(const float frames[][8], uint8_t frameCount, uint8_t reps, uint16_t delayMs){
+  uint16_t totalFrames = reps * frameCount;
+  for (uint16_t i = 0; i < totalFrames; i++){
+    bulkWriteDeg(frames[i % frameCount]);
+    delay(delayMs);
+  }
+}
+
+void q8Dynamixel::trotDemo(){
+  // Fast forward, then fast backward, using TROT_FAST's 'f' and 'b'
+  // directions (ported from python-tools/q8bot/gait_generator.py's
+  // generate_trot_trajectories(), via gait_manager.py's TROT_FAST params).
+  static const uint8_t FRAME_COUNT = 36;
+  static const uint8_t REPS = 5;  // steps per direction
+
+  static const float TROT_FAST_F[FRAME_COUNT][8] = {
+    {74.10f, 178.40f, 23.80f, 121.80f, 23.80f, 121.80f, 74.10f, 178.40f},
+    {61.50f, 185.50f, 26.60f, 125.70f, 26.60f, 125.70f, 61.50f, 185.50f},
+    {49.00f, 189.80f, 29.60f, 129.60f, 29.60f, 129.60f, 49.00f, 189.80f},
+    {35.90f, 190.00f, 32.70f, 133.40f, 32.70f, 133.40f, 35.90f, 190.00f},
+    {21.60f, 184.20f, 36.00f, 137.00f, 36.00f, 137.00f, 21.60f, 184.20f},
+    {7.30f, 172.70f, 39.40f, 140.60f, 39.40f, 140.60f, 7.30f, 172.70f},
+    {-4.20f, 158.40f, 43.00f, 144.00f, 43.00f, 144.00f, -4.20f, 158.40f},
+    {-10.00f, 144.10f, 46.60f, 147.30f, 46.60f, 147.30f, -10.00f, 144.10f},
+    {-9.80f, 131.00f, 50.40f, 150.40f, 50.40f, 150.40f, -9.80f, 131.00f},
+    {-5.50f, 118.50f, 54.30f, 153.40f, 54.30f, 153.40f, -5.50f, 118.50f},
+    {1.60f, 105.90f, 58.20f, 156.20f, 58.20f, 156.20f, 1.60f, 105.90f},
+    {10.30f, 91.80f, 62.20f, 158.80f, 62.20f, 158.80f, 10.30f, 91.80f},
+    {11.50f, 96.40f, 66.30f, 161.20f, 66.30f, 161.20f, 11.50f, 96.40f},
+    {13.00f, 100.90f, 70.50f, 163.30f, 70.50f, 163.30f, 13.00f, 100.90f},
+    {14.70f, 105.20f, 74.80f, 165.30f, 74.80f, 165.30f, 14.70f, 105.20f},
+    {16.70f, 109.50f, 79.10f, 167.00f, 79.10f, 167.00f, 16.70f, 109.50f},
+    {18.80f, 113.70f, 83.60f, 168.50f, 83.60f, 168.50f, 18.80f, 113.70f},
+    {21.20f, 117.80f, 88.20f, 169.70f, 88.20f, 169.70f, 21.20f, 117.80f},
+    {23.80f, 121.80f, 74.10f, 178.40f, 74.10f, 178.40f, 23.80f, 121.80f},
+    {26.60f, 125.70f, 61.50f, 185.50f, 61.50f, 185.50f, 26.60f, 125.70f},
+    {29.60f, 129.60f, 49.00f, 189.80f, 49.00f, 189.80f, 29.60f, 129.60f},
+    {32.70f, 133.40f, 35.90f, 190.00f, 35.90f, 190.00f, 32.70f, 133.40f},
+    {36.00f, 137.00f, 21.60f, 184.20f, 21.60f, 184.20f, 36.00f, 137.00f},
+    {39.40f, 140.60f, 7.30f, 172.70f, 7.30f, 172.70f, 39.40f, 140.60f},
+    {43.00f, 144.00f, -4.20f, 158.40f, -4.20f, 158.40f, 43.00f, 144.00f},
+    {46.60f, 147.30f, -10.00f, 144.10f, -10.00f, 144.10f, 46.60f, 147.30f},
+    {50.40f, 150.40f, -9.80f, 131.00f, -9.80f, 131.00f, 50.40f, 150.40f},
+    {54.30f, 153.40f, -5.50f, 118.50f, -5.50f, 118.50f, 54.30f, 153.40f},
+    {58.20f, 156.20f, 1.60f, 105.90f, 1.60f, 105.90f, 58.20f, 156.20f},
+    {62.20f, 158.80f, 10.30f, 91.80f, 10.30f, 91.80f, 62.20f, 158.80f},
+    {66.30f, 161.20f, 11.50f, 96.40f, 11.50f, 96.40f, 66.30f, 161.20f},
+    {70.50f, 163.30f, 13.00f, 100.90f, 13.00f, 100.90f, 70.50f, 163.30f},
+    {74.80f, 165.30f, 14.70f, 105.20f, 14.70f, 105.20f, 74.80f, 165.30f},
+    {79.10f, 167.00f, 16.70f, 109.50f, 16.70f, 109.50f, 79.10f, 167.00f},
+    {83.60f, 168.50f, 18.80f, 113.70f, 18.80f, 113.70f, 83.60f, 168.50f},
+    {88.20f, 169.70f, 21.20f, 117.80f, 21.20f, 117.80f, 88.20f, 169.70f},
+  };
+
+  static const float TROT_FAST_B[FRAME_COUNT][8] = {
+    {1.60f, 105.90f, 58.20f, 156.20f, 58.20f, 156.20f, 1.60f, 105.90f},
+    {-5.50f, 118.50f, 54.30f, 153.40f, 54.30f, 153.40f, -5.50f, 118.50f},
+    {-9.80f, 131.00f, 50.40f, 150.40f, 50.40f, 150.40f, -9.80f, 131.00f},
+    {-10.00f, 144.10f, 46.60f, 147.30f, 46.60f, 147.30f, -10.00f, 144.10f},
+    {-4.20f, 158.40f, 43.00f, 144.00f, 43.00f, 144.00f, -4.20f, 158.40f},
+    {7.30f, 172.70f, 39.40f, 140.60f, 39.40f, 140.60f, 7.30f, 172.70f},
+    {21.60f, 184.20f, 36.00f, 137.00f, 36.00f, 137.00f, 21.60f, 184.20f},
+    {35.90f, 190.00f, 32.70f, 133.40f, 32.70f, 133.40f, 35.90f, 190.00f},
+    {49.00f, 189.80f, 29.60f, 129.60f, 29.60f, 129.60f, 49.00f, 189.80f},
+    {61.50f, 185.50f, 26.60f, 125.70f, 26.60f, 125.70f, 61.50f, 185.50f},
+    {74.10f, 178.40f, 23.80f, 121.80f, 23.80f, 121.80f, 74.10f, 178.40f},
+    {88.20f, 169.70f, 21.20f, 117.80f, 21.20f, 117.80f, 88.20f, 169.70f},
+    {83.60f, 168.50f, 18.80f, 113.70f, 18.80f, 113.70f, 83.60f, 168.50f},
+    {79.10f, 167.00f, 16.70f, 109.50f, 16.70f, 109.50f, 79.10f, 167.00f},
+    {74.80f, 165.30f, 14.70f, 105.20f, 14.70f, 105.20f, 74.80f, 165.30f},
+    {70.50f, 163.30f, 13.00f, 100.90f, 13.00f, 100.90f, 70.50f, 163.30f},
+    {66.30f, 161.20f, 11.50f, 96.40f, 11.50f, 96.40f, 66.30f, 161.20f},
+    {62.20f, 158.80f, 10.30f, 91.80f, 10.30f, 91.80f, 62.20f, 158.80f},
+    {58.20f, 156.20f, 1.60f, 105.90f, 1.60f, 105.90f, 58.20f, 156.20f},
+    {54.30f, 153.40f, -5.50f, 118.50f, -5.50f, 118.50f, 54.30f, 153.40f},
+    {50.40f, 150.40f, -9.80f, 131.00f, -9.80f, 131.00f, 50.40f, 150.40f},
+    {46.60f, 147.30f, -10.00f, 144.10f, -10.00f, 144.10f, 46.60f, 147.30f},
+    {43.00f, 144.00f, -4.20f, 158.40f, -4.20f, 158.40f, 43.00f, 144.00f},
+    {39.40f, 140.60f, 7.30f, 172.70f, 7.30f, 172.70f, 39.40f, 140.60f},
+    {36.00f, 137.00f, 21.60f, 184.20f, 21.60f, 184.20f, 36.00f, 137.00f},
+    {32.70f, 133.40f, 35.90f, 190.00f, 35.90f, 190.00f, 32.70f, 133.40f},
+    {29.60f, 129.60f, 49.00f, 189.80f, 49.00f, 189.80f, 29.60f, 129.60f},
+    {26.60f, 125.70f, 61.50f, 185.50f, 61.50f, 185.50f, 26.60f, 125.70f},
+    {23.80f, 121.80f, 74.10f, 178.40f, 74.10f, 178.40f, 23.80f, 121.80f},
+    {21.20f, 117.80f, 88.20f, 169.70f, 88.20f, 169.70f, 21.20f, 117.80f},
+    {18.80f, 113.70f, 83.60f, 168.50f, 83.60f, 168.50f, 18.80f, 113.70f},
+    {16.70f, 109.50f, 79.10f, 167.00f, 79.10f, 167.00f, 16.70f, 109.50f},
+    {14.70f, 105.20f, 74.80f, 165.30f, 74.80f, 165.30f, 14.70f, 105.20f},
+    {13.00f, 100.90f, 70.50f, 163.30f, 70.50f, 163.30f, 13.00f, 100.90f},
+    {11.50f, 96.40f, 66.30f, 161.20f, 66.30f, 161.20f, 11.50f, 96.40f},
+    {10.30f, 91.80f, 62.20f, 158.80f, 62.20f, 158.80f, 10.30f, 91.80f},
+  };
+
+  // Matches the host's actual full-speed playback rate: operate.py never
+  // sets a per-frame DXL profile for gait ticks (move_all always passes
+  // dur=0, i.e. max speed/no ramp) - the tick rate is capped at
+  // clock.tick(SPEED=200), i.e. ~5ms per frame.
+  const uint16_t frameDelay = 5;      // ms between frames - fast, no ramp
+  const uint16_t segmentGapMs = 500;  // pause between forward and backward
+
+  setProfile(0);
+  delay(100);
+
+  _playFrames(TROT_FAST_F, FRAME_COUNT, REPS, frameDelay);
+  delay(segmentGapMs);
+  _playFrames(TROT_FAST_B, FRAME_COUNT, REPS, frameDelay);
 }
 
 uint8_t q8Dynamixel::parseData(const char* myData) {

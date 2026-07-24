@@ -11,25 +11,33 @@
 
 using namespace ControlTableItem;
 
+class RGBManager;  // Forward declaration - see RGBManager.h
+
 class q8Dynamixel
 {
   public:
     q8Dynamixel(Dynamixel2Arduino& dxl);
     void begin();
+    void attachRGB(RGBManager* rgb);  // Optional - lets jump() dim the LED during its current spike
     bool checkComms(uint8_t ID);
     bool commStart();
     uint16_t checkBattery();
     void enableTorque();
     void disableTorque();
     void toggleTorque(bool flag);
-    void resetTorqueState();  // Reset internal torque flag without changing hardware state
+    void resetTorqueState(bool torqueOn = false);  // Reset internal torque flag without changing hardware state
+    bool isTorqueOn() const;  // Current internal torque flag (not a hardware read)
     void setOpMode();
     void setProfile(uint16_t dur);
     void setGain(uint16_t p_gain);
     void moveSingle(int32_t val);
     void bulkWrite(int32_t values[8]);
+    void bulkWriteDeg(const float degs[8]);  // Converts to raw ticks via _deg2Dxl, then bulkWrite
+    void moveToIdle(uint16_t dur = 500);  // Move all legs to the precomputed idle/neutral pose
     uint16_t* syncRead();
     void jump();
+    void greet();      // Scripted greeting sequence (no host required)
+    void trotDemo();   // A few trot steps forward, then a few steps backward (no host required)
     void setJumpEnabled(bool enabled);
     uint8_t parseData(const char* myData);
 
@@ -58,8 +66,11 @@ class q8Dynamixel
     bool _prevTorqueFlag = false;
     bool _jumpEnabled = true;
     uint8_t _specialCmd = 0;
+    RGBManager* _rgb = nullptr;
     int32_t _deg2Dxl(float deg);
     float _dxl2Deg(int32_t dxlRaw);
+    // Plays a frame table at a constant per-frame delay. Used by trotDemo().
+    void _playFrames(const float frames[][8], uint8_t frameCount, uint8_t reps, uint16_t delayMs);
     void expandArrays();
     const float _idlePos[2]   = {30, 150};
     int32_t _idleArray[8];
