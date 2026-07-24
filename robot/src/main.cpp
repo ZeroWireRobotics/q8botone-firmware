@@ -13,6 +13,7 @@
 #include "powerManager.h"
 #include "RGBManager.h"
 #include "battery.h"
+#include "protocol.h"
 
 // Initialize global objects
 esp_now_peer_info_t peerInfo;
@@ -170,7 +171,7 @@ void espnowRxTask(void* parameter) {
         lastHeartbeatReceived = millis();  // Any DATA also counts as "alive"
         lastDataReceived = millis();
         memcpy(&theirMsg, msg.data, sizeof(theirMsg));
-        uint8_t result = q8.parseData(theirMsg.data);
+        uint8_t result = q8.parseFrame((uint8_t*)theirMsg.data, sizeof(theirMsg.data));
 
         // myMsg params
         myMsg.id = 0;  // Server ID
@@ -184,7 +185,8 @@ void espnowRxTask(void* parameter) {
             case 1: {
               // Send battery level
               queuePrint(MSG_DEBUG, "[DATA] Send battery level\n");
-              myMsg.data[0] = batteryGetPercent();
+              uint8_t percent = (uint8_t)batteryGetPercent();
+              buildFrame((uint8_t)ReplyType::BATTERY_REPLY, &percent, 1, (uint8_t*)myMsg.data);
               esp_now_send(clientMac, (uint8_t*)&myMsg, sizeof(myMsg));
               break;
             }
@@ -225,28 +227,28 @@ void espnowRxTask(void* parameter) {
             }
 
             case 3: {
-              // Send all recorded data in chunks
+              // Send all recorded data in chunks, each wrapped in its own
+              // RECORD_DATA_REPLY frame.
               if (rData != nullptr) {
                 queuePrint(MSG_DEBUG, "[DATA] Sending %d recorded data points\n", masterSize);
 
                 size_t totalSize = masterSize;  // total data in rData
-                size_t chunkSize = 100;         // Chunk size for each ESPNow send
+                // Chunk size in uint16 elements - leaves room for the 5-byte
+                // frame overhead inside the 200-byte myMsg.data buffer.
+                size_t chunkSize = 97;
                 size_t offset = 0;              // To track the position in rData
 
                 // Loop to send the data in chunks
                 while (offset < totalSize) {
                   // If rData is less than chunk size then use its size instead.
                   size_t currentChunkSize = (totalSize - offset < chunkSize) ? (totalSize - offset) : chunkSize;
-                  memcpy(myMsg.data, &rData[offset], currentChunkSize * sizeof(uint16_t));
-                  // If the chunk is smaller than 100, fill the remaining spaces with zeros
-                  if (currentChunkSize < chunkSize) {
-                    memset(&myMsg.data[currentChunkSize], 0, (chunkSize - currentChunkSize));
-                  }
+                  buildFrame((uint8_t)ReplyType::RECORD_DATA_REPLY,
+                             (const uint8_t*)&rData[offset],
+                             (uint8_t)(currentChunkSize * sizeof(uint16_t)),
+                             (uint8_t*)myMsg.data);
                   // Send the chunk via ESP-NOW
                   esp_now_send(clientMac, (uint8_t*)&myMsg, sizeof(myMsg));
-                  // Update offset and Reset myData
                   offset += currentChunkSize;
-                  memset(myMsg.data, 0, sizeof(myMsg.data));
                 }
                 delete[] rData;
                 rData = nullptr;

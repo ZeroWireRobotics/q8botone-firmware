@@ -39,7 +39,12 @@ class q8Dynamixel
     void greet();      // Scripted greeting sequence (no host required)
     void trotDemo();   // A few trot steps forward, then a few steps backward (no host required)
     void setJumpEnabled(bool enabled);
-    uint8_t parseData(const char* myData);
+    // Parses/validates a framed command (see protocol.h) already sitting in
+    // buf (bufCapacity is a safety bound, not necessarily the real frame
+    // length - the frame is self-delimiting via its own LENGTH byte).
+    // Returns 0 (no-op/handled), 1 (battery requested), 2 (move + record),
+    // or 3 (send recorded data) - same meaning as the old parseData().
+    uint8_t parseFrame(const uint8_t* buf, size_t bufCapacity);
 
   private:
     Dynamixel2Arduino& _dxl; // Member variable to store the object of Dynamixel2Arduino
@@ -65,7 +70,6 @@ class q8Dynamixel
     bool _torqueFlag = false;
     bool _prevTorqueFlag = false;
     bool _jumpEnabled = true;
-    uint8_t _specialCmd = 0;
     RGBManager* _rgb = nullptr;
     int32_t _deg2Dxl(float deg);
     float _dxl2Deg(int32_t dxlRaw);

@@ -7,6 +7,7 @@
 // Q8bot-specific Modules
 #include "systemParams.h"
 #include "macStorage.h"
+#include "protocol.h"
 
 // Initialize global objects
 esp_now_peer_info_t peerInfo;
@@ -18,6 +19,10 @@ QueueHandle_t rxQueue = NULL;
 QueueHandle_t debugQueue = NULL;
 QueueHandle_t dataOutputQueue = NULL;
 EventGroupHandle_t eventGroup = NULL;
+// Guards Serial writes shared between serialOutputTask (debug text) and
+// espnowRxTask (binary reply frames) - without this, interleaved writes
+// could corrupt a reply frame's boundaries as the host sees them.
+SemaphoreHandle_t serialTxMutex = NULL;
 
 
 // ============================================================================
@@ -91,31 +96,59 @@ void commandForwardingTask(void *param) {
 
   while (1) {
     if (Serial.available()) {
-      char c = Serial.peek();
+      int peeked = Serial.peek();  // 0-255 for a real byte, -1 if none
 
-      if (c == 'd') {
+      if (peeked == 'd') {
         Serial.read();
         debugMode = !debugMode;
         queuePrint(MSG_INFO, "Debug mode: %s\n", debugMode ? "ON" : "OFF");
       }
 #ifdef PERMANENT_PAIRING_MODE
-      else if (c == 'p') {
+      else if (peeked == 'p') {
         Serial.read();
         queuePrint(MSG_DEBUG, "[PAIRING] Force pairing mode requested\n");
         unpair();
       }
 #endif
-      else if (paired) {
-        // Forward joint commands to robot
-        int bytesRead = Serial.readBytesUntil(';', sendMsg.data, sizeof(sendMsg.data) - 1);
-        if (bytesRead > 0) {
-          sendMsg.data[bytesRead] = '\0';
+      else if (peeked == FRAME_START) {
+        Serial.read();  // consume START
 
-          // Send to robot's MAC address
-          sendMsg.msgType = DATA;
-          sendMsg.id = 1;
-          esp_now_send(serverMac, (uint8_t*)&sendMsg, sizeof(sendMsg));
+        if (!paired) {
+          // No peer to relay to - drop the frame.
+        } else {
+          uint8_t header[FRAME_HEADER_LEN];
+          size_t headerRead = Serial.readBytes(header, FRAME_HEADER_LEN);
+
+          if (headerRead != FRAME_HEADER_LEN) {
+            // Timed out - drop, resync on the next byte next iteration.
+          } else {
+            uint8_t length = header[1];
+            size_t restLen = (size_t)length + FRAME_CRC_LEN;
+
+            uint8_t* buf = (uint8_t*)sendMsg.data;
+            buf[0] = FRAME_START;
+            buf[1] = header[0];
+            buf[2] = header[1];
+            size_t restRead = Serial.readBytes(&buf[3], restLen);
+
+            if (restRead != restLen) {
+              // Timed out - drop, resync on the next byte next iteration.
+            } else {
+              uint8_t msgType; const uint8_t* payload; uint8_t payloadLen;
+              if (parseFrameBuf(buf, sizeof(sendMsg.data), &msgType, &payload, &payloadLen)) {
+                sendMsg.msgType = DATA;
+                sendMsg.id = 1;
+                esp_now_send(serverMac, (uint8_t*)&sendMsg, sizeof(sendMsg));
+              } else {
+                queuePrint(MSG_DEBUG, "[PROTOCOL] Dropped command frame - CRC/format invalid\n");
+              }
+            }
+          }
         }
+      }
+      else {
+        // Stray/unknown byte - discard so it can't wedge this loop forever.
+        Serial.read();
       }
     }
 
@@ -178,12 +211,17 @@ void espnowRxTask(void *param) {
         memcpy(&recvMsg, msg.data, sizeof(IntMessage));
         lastHeartbeatReceived = millis();  // Any DATA also counts as "alive"
 
-        // Print data array
-        for (int i = 0; i < 100; i++) {
-          Serial.print(recvMsg.data[i]);
-          Serial.print(" ");
+        // Relay the framed reply the robot built, unchanged, to the host.
+        const uint8_t* buf = (const uint8_t*)recvMsg.data;
+        uint8_t msgType; const uint8_t* payload; uint8_t payloadLen;
+        if (parseFrameBuf(buf, sizeof(recvMsg.data), &msgType, &payload, &payloadLen)) {
+          if (serialTxMutex != NULL && xSemaphoreTake(serialTxMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+            Serial.write(buf, 3 + payloadLen + FRAME_CRC_LEN);
+            xSemaphoreGive(serialTxMutex);
+          }
+        } else {
+          queuePrint(MSG_DEBUG, "[PROTOCOL] Dropped reply frame - CRC/format invalid\n");
         }
-        Serial.println();
         memset(&recvMsg, 0, sizeof(recvMsg));
       }
     }
@@ -230,12 +268,10 @@ void serialOutputTask(void *param) {
     // Check for serial output messages (blocking with timeout)
     if (xQueueReceive(debugQueue, &msg, pdMS_TO_TICKS(10)) == pdTRUE) {
       // Print based on message type
-      if (msg.type == MSG_INFO) {
-        // INFO messages always printed
+      bool shouldPrint = (msg.type == MSG_INFO) || (msg.type == MSG_DEBUG && debugMode);
+      if (shouldPrint && serialTxMutex != NULL && xSemaphoreTake(serialTxMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
         Serial.print(msg.text);
-      } else if (msg.type == MSG_DEBUG && debugMode) {
-        // DEBUG messages only when debugMode is ON
-        Serial.print(msg.text);
+        xSemaphoreGive(serialTxMutex);
       }
     }
 
@@ -334,6 +370,12 @@ void setup() {
   eventGroup = xEventGroupCreate();
   if (eventGroup == NULL) {
     Serial.println("[RTOS] Failed to create event group");
+    initSuccess = false;
+  }
+
+  serialTxMutex = xSemaphoreCreateMutex();
+  if (serialTxMutex == NULL) {
+    Serial.println("[RTOS] Failed to create serial TX mutex");
     initSuccess = false;
   }
 

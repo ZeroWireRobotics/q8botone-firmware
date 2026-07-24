@@ -8,6 +8,7 @@
 #include <Dynamixel2Arduino.h>
 #include <q8Dynamixel.h>
 #include <RGBManager.h>
+#include <protocol.h>
 
 using namespace ControlTableItem;
 
@@ -368,49 +369,63 @@ void q8Dynamixel::trotDemo(){
   _playFrames(TROT_FAST_B, FRAME_COUNT, REPS, frameDelay);
 }
 
-uint8_t q8Dynamixel::parseData(const char* myData) {
-  char* token = strtok(const_cast<char*>(myData), ",");
-  int index = 0;
-  int check = 0;
-  
-  while (token != nullptr && index < 8) {  // First 8 contain joint positions
-    _posArray[index++] = _deg2Dxl(std::atof(token));
-    token = strtok(nullptr, ",");
+uint8_t q8Dynamixel::parseFrame(const uint8_t* buf, size_t bufCapacity) {
+  uint8_t msgType;
+  const uint8_t* payload;
+  uint8_t payloadLen;
+
+  if (!parseFrameBuf(buf, bufCapacity, &msgType, &payload, &payloadLen)) {
+    return 0;  // Bad start byte, truncated buffer, or CRC mismatch - drop.
   }
-  if (token != nullptr) {                  // 9th value is for special token
-    _specialCmd = std::atoi(token);
-    token = strtok(nullptr, ",");
-    if (_specialCmd == 1){           // Battery
+
+  switch (static_cast<CmdType>(msgType)) {
+    case CmdType::MOVE: {
+      if (payloadLen < 19) return 0;  // 8 x int16 + uint16 + uint8
+
+      int16_t angleTenths[8];
+      memcpy(angleTenths, payload, sizeof(angleTenths));
+      for (int i = 0; i < 8; i++) {
+        _posArray[i] = _deg2Dxl(angleTenths[i] / 10.0f);
+      }
+
+      uint16_t profile;
+      memcpy(&profile, payload + 16, sizeof(profile));
+      _profile = profile;
+      if (_profile != _prevProfile) {
+        Serial.print("[ROBOT] Profile changed: "); Serial.println(_profile);
+        setProfile(_profile);
+        _prevProfile = _profile;
+      }
+
+      uint8_t recordFlag = payload[18];
+      bulkWrite(_posArray);
+      return recordFlag ? 2 : 0;
+    }
+
+    case CmdType::TORQUE_SET: {
+      if (payloadLen < 1) return 0;
+      _torqueFlag = (payload[0] == 1);
+      if (_torqueFlag != _prevTorqueFlag) {
+        Serial.println(_torqueFlag ? "[ROBOT] Torque on" : "[ROBOT] Torque off");
+        toggleTorque(_torqueFlag);
+        _prevTorqueFlag = _torqueFlag;
+      }
+      return 0;
+    }
+
+    case CmdType::BATTERY_REQUEST:
       return 1;
-    } else if (_specialCmd == 2){    // Record
-      check = 2;
-    } else if (_specialCmd == 3){    // Send recorded
+
+    case CmdType::RECORD_SEND:
       return 3;
-    } else if (_specialCmd == 4){    // Jump
+
+    case CmdType::JUMP:
       if (_jumpEnabled) jump();
       return 0;
-    }
-  }
-  if (token != nullptr) {                   // 10th value is vel/acc profiles
-    _profile = std::atoi(token);
-    token = strtok(nullptr, ",");
-    if (_profile != _prevProfile){
-      Serial.print("[ROBOT] Profile changed: "); Serial.println(_profile);
-      setProfile(_profile);
-      _prevProfile = _profile;
-    }
-  }
-  if (token != nullptr) {                    // 1th value is torque enable/disable
-    _torqueFlag = (std::atoi(token) == 1);
-    if (_torqueFlag != _prevTorqueFlag){
-      Serial.println(_torqueFlag ? "[ROBOT] Torque on" : "[ROBOT] Torque off");
-      toggleTorque(_torqueFlag);
-      _prevTorqueFlag = _torqueFlag;
+
+    default:
       return 0;
-    }
   }
-  bulkWrite(_posArray);
-  return check - 0;
 }
 
 int32_t q8Dynamixel::_deg2Dxl(float deg){
