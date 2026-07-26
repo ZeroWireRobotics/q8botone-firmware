@@ -14,6 +14,7 @@
 #include "RGBManager.h"
 #include "battery.h"
 #include "protocol.h"
+#include "gaitRunner.h"
 
 // Initialize global objects
 esp_now_peer_info_t peerInfo;
@@ -24,6 +25,7 @@ bool started = false;  // Track robot start state
 macStorage storage;
 PowerManager            power(LATCH_PIN, SENSE_PIN, LED_PIN);
 RGBManager              rgb(RGB_PIN);
+GaitRunner              gaitRunner(q8);
 
 // FreeRTOS Handles
 QueueHandle_t rxQueue = NULL;
@@ -544,6 +546,22 @@ void serialOutputTask(void* parameter) {
   }
 }
 
+// FreeRTOS Task: Gait Runner (Priority 2)
+// Steps an active native gait (see GaitRunner/gaitTables.h) at a fixed
+// cadence matching the host's own per-tick pace (SPEED=200 in operate.py).
+// espnowRxTask stays purely reactive - GAIT_RUN/GAIT_STOP/MOVE commands are
+// still processed immediately there; this task only advances the phase.
+void gaitRunnerTask(void* parameter) {
+  TickType_t lastWake = xTaskGetTickCount();
+
+  while (true) {
+    if (gaitRunner.isActive()) {
+      gaitRunner.tick();
+    }
+    vTaskDelayUntil(&lastWake, pdMS_TO_TICKS(5));
+  }
+}
+
 
 // ============================================================================
 // Arduino Setup. Configures FreeRTOS tasks, ESP-NOW, and other hardware.
@@ -639,6 +657,23 @@ void setup() {
     initSuccess = false;
   }
 
+  // Create gait runner task (Priority 2) - steps an active native gait
+  // (see GaitRunner/gaitTables.h) at a fixed cadence, independent of
+  // espnowRxTask so a GAIT_STOP/new-direction/MOVE command is always
+  // processed promptly rather than starved by gait stepping.
+  taskCreated = xTaskCreate(
+    gaitRunnerTask,     // Task function
+    "GaitRunner",       // Task name
+    2048,               // Stack size (bytes)
+    NULL,               // Parameters
+    2,                  // Priority (medium - below ESPNowRX's 3)
+    NULL                // Task handle
+  );
+  if (taskCreated != pdPASS) {
+    Serial.println("[RTOS] Failed to create gait runner task");
+    initSuccess = false;
+  }
+
   // Check if all FreeRTOS initialization succeeded
   if (!initSuccess) {
     Serial.println("[RTOS] Initialization failed - halting system");
@@ -668,6 +703,7 @@ void setup() {
   // Initialize Dynamixel object
   q8.begin();
   q8.attachRGB(&rgb);
+  q8.attachGaitRunner(&gaitRunner);
 }
 
 // Loop does nothing - all work done in FreeRTOS tasks

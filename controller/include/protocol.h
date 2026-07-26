@@ -24,6 +24,8 @@ enum class CmdType : uint8_t {          // host -> robot
   BATTERY_REQUEST = 0x03,
   RECORD_SEND     = 0x04,
   JUMP            = 0x05,
+  GAIT_RUN        = 0x06,  // {gait_id: uint8, direction_id: uint8} - run a local gait/direction
+  GAIT_STOP       = 0x07,  // no payload - stop autonomous gait, hand control back to raw MOVE
 };
 
 enum class ReplyType : uint8_t {        // robot -> host

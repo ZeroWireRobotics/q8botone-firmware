@@ -9,6 +9,7 @@
 #include <q8Dynamixel.h>
 #include <RGBManager.h>
 #include <protocol.h>
+#include <gaitRunner.h>
 
 using namespace ControlTableItem;
 
@@ -20,6 +21,10 @@ q8Dynamixel::q8Dynamixel(Dynamixel2Arduino& dxl) : _dxl(dxl) {
 
 void q8Dynamixel::attachRGB(RGBManager* rgb){
   _rgb = rgb;
+}
+
+void q8Dynamixel::attachGaitRunner(GaitRunner* gaitRunner){
+  _gaitRunner = gaitRunner;
 }
 
 void q8Dynamixel::begin(){
@@ -394,6 +399,11 @@ uint8_t q8Dynamixel::parseFrame(const uint8_t* buf, size_t bufCapacity) {
     case CmdType::MOVE: {
       if (payloadLen < 19) return 0;  // 8 x int16 + uint16 + uint8
 
+      // A raw MOVE always hands control back to the host, unconditionally -
+      // this is what keeps "the robot can still take raw joint positions"
+      // true regardless of whether a native gait was running.
+      if (_gaitRunner) _gaitRunner->stop();
+
       int16_t angleTenths[8];
       memcpy(angleTenths, payload, sizeof(angleTenths));
       for (int i = 0; i < 8; i++) {
@@ -434,6 +444,16 @@ uint8_t q8Dynamixel::parseFrame(const uint8_t* buf, size_t bufCapacity) {
     case CmdType::JUMP:
       if (_jumpEnabled) jump();
       else warnJumpBlocked();
+      return 0;
+
+    case CmdType::GAIT_RUN: {
+      if (payloadLen < 2) return 0;
+      if (_gaitRunner) _gaitRunner->start(payload[0], payload[1]);
+      return 0;
+    }
+
+    case CmdType::GAIT_STOP:
+      if (_gaitRunner) _gaitRunner->stop();
       return 0;
 
     default:
