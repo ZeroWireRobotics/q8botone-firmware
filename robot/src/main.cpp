@@ -303,6 +303,7 @@ void robotStateTask(void* parameter) {
   // Battery monitoring state
   // Stages: 3 = normal, 2 = low (<20%), 1 = critical (<10%), 0 = stop (<5%)
   uint8_t batteryStage = 3;
+  bool jumpEnabledPrev = true;  // Tracks last setJumpEnabled() call - reversible, unlike batteryStage
   unsigned long lastBatteryCheck = 0;
 
   // Give other tasks time to start (especially serialOutputTask)
@@ -375,6 +376,17 @@ void robotStateTask(void* parameter) {
       uint16_t pct = batteryGetPercent();
       queuePrint(MSG_DEBUG, "[BATTERY] %d%%\n", pct);
 
+      // Jump gating: reversible (unlike batteryStage below), re-checked every
+      // pass so it recovers if the battery comes back up (e.g. on charge).
+      bool jumpEnabledNow = (pct >= 50);
+      if (jumpEnabledNow != jumpEnabledPrev) {
+        jumpEnabledPrev = jumpEnabledNow;
+        q8.setJumpEnabled(jumpEnabledNow);
+        queuePrint(MSG_INFO, jumpEnabledNow
+          ? "[BATTERY] Jump re-enabled (%d%%)\n"
+          : "[BATTERY] Jump disabled - battery below 50%% (%d%%)\n", pct);
+      }
+
       uint8_t newStage;
       if      (pct >= 20) newStage = 3;
       else if (pct >= 10) newStage = 2;
@@ -385,16 +397,13 @@ void robotStateTask(void* parameter) {
         batteryStage = newStage;
         switch (batteryStage) {
           case 2:
-            q8.setJumpEnabled(false);
-            queuePrint(MSG_INFO, "[BATTERY] Low battery (%d%%) - jumping disabled\n", pct);
+            queuePrint(MSG_INFO, "[BATTERY] Low battery (%d%%)\n", pct);
             break;
           case 1:
             queuePrint(MSG_INFO, "[BATTERY] Critical battery (%d%%) - reduce activity\n", pct);
             break;
           case 0:
-            queuePrint(MSG_INFO, "[BATTERY] Battery cutoff (%d%%) - powering off\n", pct);
-            vTaskDelay(pdMS_TO_TICKS(500));  // Let the message flush before cutting power
-            power.powerOff();
+            queuePrint(MSG_INFO, "[BATTERY] Battery critical (%d%%)\n", pct);
             break;
         }
       }
@@ -418,8 +427,19 @@ void robotStateTask(void* parameter) {
       }
 
       case STATE_PAIRED: {
-        // Solid blue on RGB LED (waiting for torque enable)
-        rgb.setColor(0, 0, 255);
+        // Solid blue once heartbeats are actively coming in from the
+        // controller; brief blink while paired but not yet hearing them
+        // (e.g. right after pairing, or if the link has gone quiet). A
+        // blink (not a sine breathe) survives the ~1s vTaskDelay block
+        // below without visibly stuttering.
+        bool heartbeatAlive = (now >= lastHeartbeatReceived) &&
+                               (now - lastHeartbeatReceived <= HEARTBEAT_TIMEOUT_ROBOT);
+        if (heartbeatAlive) {
+          rgb.setColor(0, 0, 255);
+        } else {
+          bool blinkOn = (now % 2000) < 500;
+          rgb.setColor(0, 0, blinkOn ? 255 : 0);
+        }
 
         // Double blink every 2 seconds (waiting for torque enable)
         if (now - lastActivity >= 2000) {
@@ -446,8 +466,24 @@ void robotStateTask(void* parameter) {
       }
 
       case STATE_STARTED: {
-        // Solid green on RGB LED (running)
-        rgb.setColor(0, 255, 0);
+        // RGB reflects torque + battery state. Torque off -> solid blue
+        // (matches STATE_PAIRED). Torque on -> breathe/pulse colored by
+        // batteryStage, updated once per 100ms task tick.
+        if (!q8.isTorqueOn()) {
+          rgb.setColor(0, 0, 255);
+        } else {
+          uint8_t baseR, baseG, baseB;
+          uint16_t periodMs;
+          switch (batteryStage) {
+            case 3:  baseR = 0;   baseG = 255; baseB = 0;   periodMs = 3000; break;  // breathe green
+            case 2:  baseR = 255; baseG = 255; baseB = 0;   periodMs = 3000; break;  // breathe yellow
+            case 1:  baseR = 255; baseG = 80;  baseB = 0;   periodMs = 900;  break;  // pulse orange
+            default: baseR = 255; baseG = 0;   baseB = 0;   periodMs = 900;  break;  // pulse red
+          }
+          float phase = fmodf((float)now, (float)periodMs) / (float)periodMs;
+          float level = (sinf(2.0f * PI * phase - PI / 2.0f) + 1.0f) / 2.0f;  // 0..1 smooth ramp
+          rgb.setColor((uint8_t)(baseR * level), (uint8_t)(baseG * level), (uint8_t)(baseB * level));
+        }
 
         // Breathing LED pattern every 10 seconds
         if (now - lastActivity >= 10000) {

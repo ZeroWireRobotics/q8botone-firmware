@@ -196,6 +196,18 @@ void q8Dynamixel::setJumpEnabled(bool enabled) {
   _jumpEnabled = enabled;
 }
 
+void q8Dynamixel::warnJumpBlocked() {
+  if (!_rgb) return;
+  for (int i = 0; i < 3; ++i) {
+    _rgb->setColor(255, 0, 0);
+    delay(120);
+    _rgb->off();
+    delay(120);
+  }
+  // Leaves RGB off - robotStateTask repaints the correct color on its next
+  // ~100ms tick, same as jump() does after dimming for the current spike.
+}
+
 void q8Dynamixel::jump(){
   // Dim the RGB LED for the duration of the jump - one less simultaneous
   // current draw during the biggest current spike this robot ever makes.
@@ -421,6 +433,7 @@ uint8_t q8Dynamixel::parseFrame(const uint8_t* buf, size_t bufCapacity) {
 
     case CmdType::JUMP:
       if (_jumpEnabled) jump();
+      else warnJumpBlocked();
       return 0;
 
     default:

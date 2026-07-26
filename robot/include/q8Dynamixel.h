@@ -39,6 +39,7 @@ class q8Dynamixel
     void greet();      // Scripted greeting sequence (no host required)
     void trotDemo();   // A few trot steps forward, then a few steps backward (no host required)
     void setJumpEnabled(bool enabled);
+    void warnJumpBlocked();  // A few red RGB pulses - jump requested while disabled (low battery)
     // Parses/validates a framed command (see protocol.h) already sitting in
     // buf (bufCapacity is a safety bound, not necessarily the real frame
     // length - the frame is self-delimiting via its own LENGTH byte).
