@@ -285,23 +285,34 @@ void pairingTask(void *param) {
   TickType_t lastWake = xTaskGetTickCount();
 
   // On first run, check for saved MAC address
+  bool reconnected = false;
   if (storage.loadPeerMAC(serverMac)) {
-    char macStr[18];
-    sprintf(macStr, "%02X:%02X:%02X:%02X:%02X:%02X",
-            serverMac[0], serverMac[1], serverMac[2],
-            serverMac[3], serverMac[4], serverMac[5]);
-    queuePrint(MSG_DEBUG, "[PAIRING] Found saved MAC: %s\n", macStr);
+    if (addPeer(serverMac)) {
+      char macStr[18];
+      sprintf(macStr, "%02X:%02X:%02X:%02X:%02X:%02X",
+              serverMac[0], serverMac[1], serverMac[2],
+              serverMac[3], serverMac[4], serverMac[5]);
+      queuePrint(MSG_DEBUG, "[PAIRING] Found saved MAC: %s\n", macStr);
 
-    addPeer(serverMac);
-    paired = true;
-    lastHeartbeatReceived = millis();
-    lastHeartbeatSent = millis();
+      paired = true;
+      lastHeartbeatReceived = millis();
+      lastHeartbeatSent = millis();
 
-    queuePrint(MSG_DEBUG, "[PAIRING] Attempting to reconnect to saved peer\n");
+      queuePrint(MSG_DEBUG, "[PAIRING] Attempting to reconnect to saved peer\n");
 
-    // Signal that we're already paired
-    xEventGroupSetBits(eventGroup, EVENT_PAIRED);
-  } else {
+      // Signal that we're already paired
+      xEventGroupSetBits(eventGroup, EVENT_PAIRED);
+      reconnected = true;
+    } else {
+      // ESP-NOW not ready yet (shouldn't happen now that init() runs before
+      // task creation, but stay defensive) - fall back to a fresh pairing
+      // broadcast instead of declaring "paired" with no peer registered.
+      queuePrint(MSG_DEBUG, "[PAIRING] addPeer failed for saved MAC - falling back to fresh pairing\n");
+      memset(serverMac, 0, sizeof(serverMac));
+      storage.clearPeerMAC();
+    }
+  }
+  if (!reconnected) {
     queuePrint(MSG_DEBUG, "[PAIRING] No saved MAC found - entering pairing mode\n");
   }
 
@@ -379,6 +390,32 @@ void setup() {
     initSuccess = false;
   }
 
+  // Init Wi-Fi + ESP-NOW BEFORE creating any tasks. pairingTask's startup
+  // EEPROM-reconnect logic (addPeer() from a saved MAC) runs immediately
+  // when that task starts, with no delay at all - if it ran concurrently
+  // with WiFi/ESP-NOW bring-up here, addPeer() could silently fail (ESP-NOW
+  // not yet initialized) while the code still declared the controller
+  // "paired". With PERMANENT_PAIRING_MODE builds (the default envs) there
+  // is no timeout-driven self-correction from that state, so it would be a
+  // silent, permanent dead end after any reset. Doing this first removes
+  // the race entirely; queues/event group above must exist first since
+  // onRecv() (registered below) pushes into rxQueue.
+  WiFi.mode(WIFI_STA);
+  WiFi.macAddress(clientMac);
+  esp_wifi_start();
+  esp_wifi_set_promiscuous(true);
+  esp_wifi_set_channel(chan, WIFI_SECOND_CHAN_NONE);
+  esp_wifi_set_promiscuous(false);
+
+  if (esp_now_init() != ESP_OK) {
+    Serial.println("[ESPNOW] Init failed");
+    initSuccess = false;
+  } else {
+    esp_now_register_recv_cb(onRecv);
+    esp_now_register_send_cb(OnDataSent);
+    addPeer(broadcastMAC);
+  }
+
   // Create FreeRTOS tasks
   // Create serial output task (Priority 1)
   BaseType_t taskCreated = xTaskCreate(
@@ -450,27 +487,11 @@ void setup() {
     initSuccess = false;
   }
 
-  // Check if all FreeRTOS initialization succeeded
+  // Check if all FreeRTOS/WiFi/ESP-NOW initialization succeeded
   if (!initSuccess) {
     Serial.println("[RTOS] Initialization failed - halting system");
     while(1) { delay(1000); }  // Halt system indefinitely
   }
-
-  // Init Wi-Fi; set device as a Wi-Fi Station (after FreeRTOS primitives are ready)
-  WiFi.mode(WIFI_STA);
-  WiFi.macAddress(clientMac);
-  esp_wifi_start();
-  esp_wifi_set_promiscuous(true);
-  esp_wifi_set_channel(chan, WIFI_SECOND_CHAN_NONE);
-  esp_wifi_set_promiscuous(false);
-
-  // Init ESP-NOW (after FreeRTOS primitives are ready)
-  if (esp_now_init() != ESP_OK) {
-    return;
-  }
-  esp_now_register_recv_cb(onRecv);
-  esp_now_register_send_cb(OnDataSent);
-  addPeer(broadcastMAC);
 }
 
 // Loop does nothing - all work done in FreeRTOS tasks

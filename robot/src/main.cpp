@@ -16,6 +16,14 @@
 #include "protocol.h"
 #include "gaitRunner.h"
 
+// ============================================================================
+// TEMPORARY BENCH-TEST OVERRIDE - remove before normal/battery use.
+// Skips the button-hold-to-boot latch and the shutdown monitor task (so the
+// robot boots immediately and never powers itself off), and disables the
+// double-tap backup-demo trigger.
+// ============================================================================
+#define BENCH_DISABLE_POWER_MGMT 1
+
 // Initialize global objects
 esp_now_peer_info_t peerInfo;
 HardwareSerial          ser(0);
@@ -319,18 +327,25 @@ void robotStateTask(void* parameter) {
   while (true) {
     // On first run, check for saved MAC address
     if (firstRun) {
-      firstRun = false;
       if (storage.loadPeerMAC(clientMac)) {
-        queuePrint(MSG_DEBUG, "[PAIRING] Found saved controller MAC: %02X:%02X:%02X:%02X:%02X:%02X\n",
-                   clientMac[0], clientMac[1], clientMac[2], clientMac[3], clientMac[4], clientMac[5]);
-        addPeer(clientMac);
-        paired = true;
-        robotState = STATE_PAIRED;
-        lastHeartbeatReceived = millis();
-        xEventGroupClearBits(eventGroup, EVENT_UNPAIRED);
-        xEventGroupSetBits(eventGroup, EVENT_PAIRED);
-        queuePrint(MSG_INFO, "[PAIRING] Attempting to reconnect to saved controller\n");
+        if (addPeer(clientMac)) {
+          firstRun = false;
+          queuePrint(MSG_DEBUG, "[PAIRING] Found saved controller MAC: %02X:%02X:%02X:%02X:%02X:%02X\n",
+                     clientMac[0], clientMac[1], clientMac[2], clientMac[3], clientMac[4], clientMac[5]);
+          paired = true;
+          robotState = STATE_PAIRED;
+          lastHeartbeatReceived = millis();
+          xEventGroupClearBits(eventGroup, EVENT_UNPAIRED);
+          xEventGroupSetBits(eventGroup, EVENT_PAIRED);
+          queuePrint(MSG_INFO, "[PAIRING] Attempting to reconnect to saved controller\n");
+        } else {
+          // ESP-NOW not ready yet - retry next pass instead of declaring
+          // "paired" with no peer actually registered (see setup()'s
+          // WiFi/ESP-NOW-before-tasks ordering, which should make this rare).
+          queuePrint(MSG_DEBUG, "[PAIRING] addPeer failed for saved MAC - will retry\n");
+        }
       } else {
+        firstRun = false;
         queuePrint(MSG_INFO, "[PAIRING] No saved MAC found - waiting for pairing request\n");
       }
     }
@@ -338,6 +353,7 @@ void robotStateTask(void* parameter) {
     unsigned long now = millis();
     RobotState currentState = robotState;
 
+#if !BENCH_DISABLE_POWER_MGMT
     // Backup demo trigger: double-tap the power button while torque is off
     // (i.e. no host is actively driving the robot) to run exactly one demo
     // move, cycling to the next on each subsequent double-tap. Ignored
@@ -370,6 +386,7 @@ void robotStateTask(void* parameter) {
       q8.toggleTorque(false);
       q8.resetTorqueState(false);
     }
+#endif  // !BENCH_DISABLE_POWER_MGMT
 
     // Battery check: every 30s, but only when commands have been quiet for 5s
     // (avoids reading under motor load or during a jump sequence)
@@ -570,11 +587,19 @@ void setup() {
   Serial.begin(115200);
   pinMode(LED_PIN, OUTPUT);
 
+#if BENCH_DISABLE_POWER_MGMT
+  // Bench mode - skip the button-hold requirement and latch power on
+  // immediately.
+  pinMode(LATCH_PIN, OUTPUT);
+  digitalWrite(LATCH_PIN, HIGH);
+  Serial.println("[POWER] Bench mode - latch forced on, button hold skipped");
+#else
   // Power latch — must run before anything else
   while (!power.begin()) {
     // Serial.println("[POWER] Button released early - hold for 3s to power on");
   }
   Serial.println("[POWER] Latched on");
+#endif
   rgb.begin();
 
   bool initSuccess = true;
@@ -598,6 +623,28 @@ void setup() {
   if (eventGroup == NULL) {
     Serial.println("[RTOS] Failed to create event group");
     initSuccess = false;
+  }
+
+  // Init Wi-Fi + ESP-NOW BEFORE creating any tasks. robotStateTask's
+  // firstRun EEPROM-reconnect logic (addPeer() from a saved MAC) runs as
+  // soon as that task starts - if it ran concurrently with WiFi/ESP-NOW
+  // bring-up here (which can take 100ms+), addPeer() could silently fail
+  // (ESP-NOW not yet initialized) while the code still declared the robot
+  // "paired". With PERMANENT_PAIRING_MODE builds (the default envs) there
+  // is no timeout-driven self-correction from that state, so it would be
+  // a silent, permanent dead end after any reset. Doing this first removes
+  // the race entirely; queues/event group above must exist first since
+  // onRecv() (registered below) pushes into rxQueue.
+  WiFi.mode(WIFI_AP_STA);
+  WiFi.softAP("esp-server", nullptr, chan); // Optional, just to enable softAP mode
+  chan = WiFi.channel();
+  WiFi.softAPmacAddress(serverMac);
+
+  if (esp_now_init() != ESP_OK) {
+    Serial.println("ESP-NOW init failed");
+    initSuccess = false;
+  } else {
+    esp_now_register_recv_cb(onRecv);  // Set up callback when data is received.
   }
 
   // Create FreeRTOS tasks
@@ -674,31 +721,20 @@ void setup() {
     initSuccess = false;
   }
 
-  // Check if all FreeRTOS initialization succeeded
+  // Check if all FreeRTOS/WiFi/ESP-NOW initialization succeeded
   if (!initSuccess) {
     Serial.println("[RTOS] Initialization failed - halting system");
     while(1) { delay(1000); }  // Halt system indefinitely
   }
 
-  // Init Wi-Fi
-  WiFi.mode(WIFI_AP_STA);
-  WiFi.softAP("esp-server", nullptr, chan); // Optional, just to enable softAP mode
-  chan = WiFi.channel();
-  WiFi.softAPmacAddress(serverMac);
-
-  // Init ESP-NOW (after FreeRTOS primitives are ready)
-  if (esp_now_init() != ESP_OK) {
-    Serial.println("ESP-NOW init failed");
-    return;
-  }
-  esp_now_register_recv_cb(onRecv);  // Set up callback when data is received.
-
   // BQ25887 Init
   Wire.begin();
   batteryInit();
 
+#if !BENCH_DISABLE_POWER_MGMT
   // Start power button monitor task (must be after all xTaskCreate calls)
   power.startMonitorTask();
+#endif
 
   // Initialize Dynamixel object
   q8.begin();
