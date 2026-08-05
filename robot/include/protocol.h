@@ -26,6 +26,8 @@ enum class CmdType : uint8_t {          // host -> robot
   JUMP            = 0x05,
   GAIT_RUN        = 0x06,  // {gait_id: uint8, direction_id: uint8} - run a local gait/direction
   GAIT_STOP       = 0x07,  // no payload - stop autonomous gait, hand control back to raw MOVE
+  GREET           = 0x08,  // no payload - scripted greeting sequence, runs entirely on the robot
+  HOST_CONNECTED  = 0x09,  // no payload - controller-local only, never forwarded to the robot
 };
 
 // Canonical direction ordering for GAIT_RUN's direction_id (0-11). Must

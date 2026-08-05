@@ -8,11 +8,34 @@
 #include "systemParams.h"
 #include "macStorage.h"
 #include "protocol.h"
+#include "gamepadQT.h"
+#include "independentControl.h"
+
+// Independent (gamepad) mode vs relay mode - see independentControlTask()
+// and commandForwardingTask()'s HOST_CONNECTED handling. Independent by
+// default at boot; once a host connects, relay mode is one-way until a
+// power cycle (ESP32-C3 native USB-CDC has no reliable continuous
+// "still connected" signal to auto-revert on).
+enum ControllerMode { MODE_INDEPENDENT, MODE_RELAY };
+volatile ControllerMode controllerMode = MODE_INDEPENDENT;
+
+// Tunable: how long START+SELECT must be held together (in independent
+// mode) to force pairing mode, and how long the resulting broadcast keeps
+// retrying before giving up. See independentControlTask()/pairingTask().
+const uint32_t PAIRING_HOLD_MS = 5000;
+const uint32_t PAIRING_TIMEOUT_MS = 30000;
+// Set true right before a manually-triggered unpair() (gamepad combo hold)
+// so pairingTask knows to bound its broadcast retry to PAIRING_TIMEOUT_MS -
+// the pre-existing 'p' serial command and a fresh boot's "no saved MAC"
+// case both leave this false, retrying forever as before.
+bool manualPairingEntry = false;
 
 // Initialize global objects
 esp_now_peer_info_t peerInfo;
 Preferences prefs;
 macStorage storage;
+GamepadQT gamepad;
+bool gamepadAvailable = false;  // Set in setup() - relay firmware works fine without one attached
 
 // FreeRTOS Handles
 QueueHandle_t rxQueue = NULL;
@@ -65,6 +88,54 @@ void unpair() {
   }
 }
 
+// Manual pairing-mode entry (gamepad START+SELECT hold) - unlike the
+// pre-existing 'p' serial command, this bounds the resulting broadcast
+// retry to PAIRING_TIMEOUT_MS (see pairingTask()).
+void enterPairingModeManually() {
+  manualPairingEntry = true;
+  unpair();
+}
+
+// Builds and sends a command frame directly to the paired robot - used by
+// independentControlTask() for all its own sends (GAIT_RUN/JUMP/GREET/
+// TORQUE_SET/GAIT_STOP). Uses its own local message buffer (not the
+// shared sendMsg global commandForwardingTask uses for relaying) since
+// this can run concurrently with that task on a different core.
+bool sendCommandToRobot(CmdType cmd, const uint8_t* payload = nullptr, uint8_t payloadLen = 0) {
+  if (!paired) return false;
+  CharMessage msg;
+  msg.msgType = DATA;
+  msg.id = 1;
+  buildFrame((uint8_t)cmd, payload, payloadLen, (uint8_t*)msg.data);
+  esp_now_send(serverMac, (uint8_t*)&msg, sizeof(msg));
+  return true;
+}
+
+// Moves all 4 legs to the given cyclable gait's own (x0, y0) neutral pose
+// (see independentControl.h's ikSolveNeutral()/INDEPENDENT_GAIT_NEUTRAL_*),
+// mirroring operate.py's move_xy(pos_x, pos_y, dur) - a raw MOVE, mirrored
+// across all 4 legs exactly like move_mirror() does. Payload layout must
+// match q8Dynamixel.cpp's MOVE case exactly: 8x int16 (tenths of a degree)
+// + uint16 dur + uint8 record flag, native (little-endian) byte order -
+// matches Python's struct.pack('<8hHB', ...) since ESP32 is also little-endian.
+bool sendMoveToGaitNeutral(uint8_t gaitCycleIndex, uint16_t durMs) {
+  float q1Deg, q2Deg;
+  ikSolveNeutral(INDEPENDENT_GAIT_NEUTRAL_X[gaitCycleIndex], INDEPENDENT_GAIT_NEUTRAL_Y[gaitCycleIndex], q1Deg, q2Deg);
+
+  int16_t angleTenths[8];
+  for (int leg = 0; leg < 4; leg++) {
+    angleTenths[leg * 2]     = (int16_t)lroundf(q1Deg * 10.0f);
+    angleTenths[leg * 2 + 1] = (int16_t)lroundf(q2Deg * 10.0f);
+  }
+
+  uint8_t payload[19];
+  memcpy(payload, angleTenths, sizeof(angleTenths));
+  memcpy(payload + 16, &durMs, sizeof(durMs));
+  payload[18] = 0;  // record = false
+
+  return sendCommandToRobot(CmdType::MOVE, payload, sizeof(payload));
+}
+
 
 // ============================================================================
 // ESPNOW Callbacks: ISR-Like, Highest Priority
@@ -103,45 +174,51 @@ void commandForwardingTask(void *param) {
         debugMode = !debugMode;
         queuePrint(MSG_INFO, "Debug mode: %s\n", debugMode ? "ON" : "OFF");
       }
-#ifdef PERMANENT_PAIRING_MODE
       else if (peeked == 'p') {
         Serial.read();
         queuePrint(MSG_DEBUG, "[PAIRING] Force pairing mode requested\n");
         unpair();
       }
-#endif
       else if (peeked == FRAME_START) {
         Serial.read();  // consume START
 
-        if (!paired) {
-          // No peer to relay to - drop the frame.
-        } else {
-          uint8_t header[FRAME_HEADER_LEN];
-          size_t headerRead = Serial.readBytes(header, FRAME_HEADER_LEN);
+        uint8_t header[FRAME_HEADER_LEN];
+        size_t headerRead = Serial.readBytes(header, FRAME_HEADER_LEN);
 
-          if (headerRead != FRAME_HEADER_LEN) {
+        if (headerRead != FRAME_HEADER_LEN) {
+          // Timed out - drop, resync on the next byte next iteration.
+        } else {
+          uint8_t length = header[1];
+          size_t restLen = (size_t)length + FRAME_CRC_LEN;
+
+          uint8_t* buf = (uint8_t*)sendMsg.data;
+          buf[0] = FRAME_START;
+          buf[1] = header[0];
+          buf[2] = header[1];
+          size_t restRead = Serial.readBytes(&buf[3], restLen);
+
+          if (restRead != restLen) {
             // Timed out - drop, resync on the next byte next iteration.
           } else {
-            uint8_t length = header[1];
-            size_t restLen = (size_t)length + FRAME_CRC_LEN;
-
-            uint8_t* buf = (uint8_t*)sendMsg.data;
-            buf[0] = FRAME_START;
-            buf[1] = header[0];
-            buf[2] = header[1];
-            size_t restRead = Serial.readBytes(&buf[3], restLen);
-
-            if (restRead != restLen) {
-              // Timed out - drop, resync on the next byte next iteration.
-            } else {
-              uint8_t msgType; const uint8_t* payload; uint8_t payloadLen;
-              if (parseFrameBuf(buf, sizeof(sendMsg.data), &msgType, &payload, &payloadLen)) {
+            uint8_t msgType; const uint8_t* payload; uint8_t payloadLen;
+            if (parseFrameBuf(buf, sizeof(sendMsg.data), &msgType, &payload, &payloadLen)) {
+              // HOST_CONNECTED is controller-local - parsed regardless of
+              // pairing state (a host may connect before independent mode
+              // has paired with a robot yet), never forwarded.
+              if ((CmdType)msgType == CmdType::HOST_CONNECTED) {
+                if (controllerMode != MODE_RELAY) {
+                  controllerMode = MODE_RELAY;
+                  queuePrint(MSG_INFO, "[MODE] Host connected - switching to relay mode\n");
+                }
+              } else if (!paired) {
+                // No peer to relay to - drop the frame.
+              } else {
                 sendMsg.msgType = DATA;
                 sendMsg.id = 1;
                 esp_now_send(serverMac, (uint8_t*)&sendMsg, sizeof(sendMsg));
-              } else {
-                queuePrint(MSG_DEBUG, "[PROTOCOL] Dropped command frame - CRC/format invalid\n");
               }
+            } else {
+              queuePrint(MSG_DEBUG, "[PROTOCOL] Dropped command frame - CRC/format invalid\n");
             }
           }
         }
@@ -245,14 +322,6 @@ void heartbeatTask(void *param) {
       queuePrint(MSG_DEBUG, "[HEARTBEAT] Sending heartbeat (last response: %lums ago)\n", timeSinceLastHB);
 
       esp_now_send(serverMac, (uint8_t*)&heartbeatMsg, sizeof(heartbeatMsg));
-
-      // Check for timeout (only in auto-pairing mode)
-#ifndef PERMANENT_PAIRING_MODE
-      if (timeSinceLastHB > HEARTBEAT_TIMEOUT) {
-        queuePrint(MSG_DEBUG, "[HEARTBEAT] Timeout detected (%lums since last response)\n", timeSinceLastHB);
-        unpair();
-      }
-#endif
     }
 
     // Run at frequency defined by constant
@@ -283,6 +352,7 @@ void serialOutputTask(void *param) {
 // FreeRTOS Task: Pairing Manager (Priority 0 - LOWEST)
 void pairingTask(void *param) {
   TickType_t lastWake = xTaskGetTickCount();
+  uint32_t broadcastStartMs = 0;  // 0 = not currently in a bounded (manual) broadcast window
 
   // On first run, check for saved MAC address
   bool reconnected = false;
@@ -321,22 +391,44 @@ void pairingTask(void *param) {
     bool isPaired = paired;
 
     if (!isPaired) {
-      // Send pairing broadcast every 2s
-      if (debugQueue != NULL) {
-        queuePrint(MSG_DEBUG, "[PAIRING] Sending broadcast...\n");
+      bool shouldBroadcast = true;
+
+      if (manualPairingEntry) {
+        if (broadcastStartMs == 0) broadcastStartMs = millis();
+        if ((millis() - broadcastStartMs) >= PAIRING_TIMEOUT_MS) {
+          queuePrint(MSG_INFO, "[PAIRING] No response after %lums - giving up (hold START+SELECT again to retry)\n",
+                     (unsigned long)PAIRING_TIMEOUT_MS);
+          manualPairingEntry = false;
+          broadcastStartMs = 0;
+          shouldBroadcast = false;
+        }
+      } else {
+        broadcastStartMs = 0;  // Not a bounded window (fresh boot / 'p' command) - broadcast forever
       }
 
-      PairingMessage pairingMsg;
-      pairingMsg.msgType = PAIRING;
-      pairingMsg.id = 1;
-      pairingMsg.role = ROLE_CONTROLLER;
-      memcpy(pairingMsg.macAddr, clientMac, 6);
-      pairingMsg.channel = chan;
+      if (shouldBroadcast) {
+        // Send pairing broadcast every 2s
+        if (debugQueue != NULL) {
+          queuePrint(MSG_DEBUG, "[PAIRING] Sending broadcast...\n");
+        }
 
-      esp_now_send(broadcastMAC, (uint8_t*)&pairingMsg, sizeof(pairingMsg));
+        PairingMessage pairingMsg;
+        pairingMsg.msgType = PAIRING;
+        pairingMsg.id = 1;
+        pairingMsg.role = ROLE_CONTROLLER;
+        memcpy(pairingMsg.macAddr, clientMac, 6);
+        pairingMsg.channel = chan;
 
+        esp_now_send(broadcastMAC, (uint8_t*)&pairingMsg, sizeof(pairingMsg));
+      }
+
+      // Still tick every 2s even once given up, so a fresh manual
+      // combo-hold request is picked up promptly rather than needing a
+      // separate wakeup mechanism.
       vTaskDelayUntil(&lastWake, pdMS_TO_TICKS(2000));
     } else {
+      broadcastStartMs = 0;
+
       // Block until unpaired event
       EventBits_t bits = xEventGroupWaitBits(
         eventGroup,
@@ -349,6 +441,149 @@ void pairingTask(void *param) {
       // Reset timing after unpair event
       lastWake = xTaskGetTickCount();
     }
+  }
+}
+
+// ============================================================================
+// FreeRTOS Task: Independent Control (Priority 0 - lowest, diagnostic-
+// adjacent). Drives the robot directly from the gamepad whenever
+// controllerMode == MODE_INDEPENDENT and paired; goes idle (one clean
+// GAIT_STOP handoff) the moment relay mode takes over. See
+// independentControl.h for the ported direction/tier decision logic this
+// is built on.
+// ============================================================================
+void independentControlTask(void* parameter) {
+  const uint8_t GAIT_COUNT = 5;              // Matches INDEPENDENT_GAIT_IDS/NAMES size
+  const uint32_t GAIT_RESEND_MS = 250;       // Matches operate.py's NATIVE_GAIT_RESEND_INTERVAL
+
+  TickType_t lastWake = xTaskGetTickCount();
+  uint8_t trotTierIndex = 2;       // Index into TROT_TIER_GAIT_IDS - starts at fastest
+  uint8_t gaitCycleIndex = 0;      // Index into INDEPENDENT_GAIT_IDS - starts at TROT_FAST
+  bool torqued = false;
+  bool gaitActive = false;
+  uint8_t lastSentGaitId = 0;
+  uint8_t lastSentDirectionId = 0;
+  uint32_t lastSendMs = 0;
+  bool pairingComboLatched = false;
+  bool wasPaired = false;
+
+  while (true) {
+    gamepad.update();
+
+    if (controllerMode != MODE_INDEPENDENT) {
+      // Host has taken over - one clean handoff, then stay idle until a
+      // power cycle brings independent mode back.
+      if (gaitActive) {
+        sendCommandToRobot(CmdType::GAIT_STOP);
+        gaitActive = false;
+      }
+      vTaskDelayUntil(&lastWake, pdMS_TO_TICKS(GamepadQT::GAMEPAD_POLL_MS));
+      continue;
+    }
+
+    // Manual pairing-mode entry: hold START+SELECT for PAIRING_HOLD_MS.
+    if (gamepad.comboHeldFor(PAIRING_HOLD_MS) && !pairingComboLatched) {
+      pairingComboLatched = true;
+      queuePrint(MSG_INFO, "[GAMEPAD] START+SELECT held %lums - forcing pairing mode\n",
+                 (unsigned long)PAIRING_HOLD_MS);
+      if (gaitActive) {
+        sendCommandToRobot(CmdType::GAIT_STOP);
+        gaitActive = false;
+      }
+      enterPairingModeManually();
+    }
+    if (!gamepad.isPressed(GamepadQT::BTN_START) || !gamepad.isPressed(GamepadQT::BTN_SELECT)) {
+      pairingComboLatched = false;
+    }
+
+    bool isPaired = paired;
+    if (!isPaired) {
+      wasPaired = false;
+      vTaskDelayUntil(&lastWake, pdMS_TO_TICKS(GamepadQT::GAMEPAD_POLL_MS));
+      continue;
+    }
+    if (!wasPaired) {
+      // Fresh (re)connection - the robot's own torque state resets to off
+      // on any boot, so don't trust a stale local flag; gait selection
+      // preference is fine to carry over.
+      wasPaired = true;
+      torqued = false;
+      gaitActive = false;
+    }
+
+    if (gamepad.wasPressed(GamepadQT::BTN_START)) {
+      torqued = !torqued;
+      uint8_t val = torqued ? 1 : 0;
+      sendCommandToRobot(CmdType::TORQUE_SET, &val, 1);
+      if (torqued) {
+        // Settle into the current gait's own neutral stance rather than
+        // leaving legs wherever they physically were while untorqued -
+        // avoids a jerky snap into the trajectory on the next GAIT_RUN.
+        sendMoveToGaitNeutral(gaitCycleIndex, 500);
+      }
+      queuePrint(MSG_INFO, "[GAMEPAD] Torque %s\n", torqued ? "ON" : "OFF");
+    }
+
+    if (gamepad.wasPressed(GamepadQT::BTN_SELECT)) {
+      gaitCycleIndex = (gaitCycleIndex + 1) % GAIT_COUNT;
+      if (gaitActive) {
+        sendCommandToRobot(CmdType::GAIT_STOP);
+        gaitActive = false;
+      }
+      if (INDEPENDENT_GAIT_IDS[gaitCycleIndex] == TROT_TIER_GAIT_IDS[2]) {
+        trotTierIndex = 2;  // Start fresh at fastest, matching operate.py's switch_gait convention
+      }
+      // Settle into the new gait's own neutral stance immediately, same as
+      // operate.py's switch_gait handler's move_xy(pos_x, pos_y, 500).
+      sendMoveToGaitNeutral(gaitCycleIndex, 500);
+      queuePrint(MSG_INFO, "[GAMEPAD] Switched to %s\n", INDEPENDENT_GAIT_NAMES[gaitCycleIndex]);
+    }
+
+    if (gamepad.wasPressed(GamepadQT::BTN_Y)) {
+      sendCommandToRobot(CmdType::JUMP);
+      queuePrint(MSG_INFO, "[GAMEPAD] Jump\n");
+    }
+    if (gamepad.wasPressed(GamepadQT::BTN_X)) {
+      sendCommandToRobot(CmdType::GREET);
+      queuePrint(MSG_INFO, "[GAMEPAD] Greet\n");
+    }
+
+    // Joystick -> movement (always native GAIT_RUN - no host to stream raw positions to).
+    float jx = gamepad.joystickX();
+    float jy = gamepad.joystickY();
+    Direction dir = resolveDirection(jx, jy);
+
+    if (dir == Direction::NONE) {
+      if (gaitActive) {
+        sendCommandToRobot(CmdType::GAIT_STOP);
+        sendMoveToGaitNeutral(gaitCycleIndex, 0);  // Immediate, matching operate.py's idle-transition move_xy(..., 0)
+        gaitActive = false;
+      }
+    } else {
+      uint8_t sendGaitId = INDEPENDENT_GAIT_IDS[gaitCycleIndex];
+
+      if (sendGaitId == TROT_TIER_GAIT_IDS[2]) {  // TROT_FAST selected - blend tiers by magnitude
+        float magnitude = fminf(1.0f, sqrtf(jx * jx + jy * jy));
+        trotTierIndex = resolveTrotTier(trotTierIndex, magnitude);
+        sendGaitId = TROT_TIER_GAIT_IDS[trotTierIndex];
+      }
+
+      uint8_t directionId = (uint8_t)dir;
+      uint32_t now = millis();
+      bool changed = !gaitActive || sendGaitId != lastSentGaitId || directionId != lastSentDirectionId;
+      bool resendDue = (now - lastSendMs) >= GAIT_RESEND_MS;
+
+      if (changed || resendDue) {
+        uint8_t payload[2] = {sendGaitId, directionId};
+        sendCommandToRobot(CmdType::GAIT_RUN, payload, 2);
+        gaitActive = true;
+        lastSentGaitId = sendGaitId;
+        lastSentDirectionId = directionId;
+        lastSendMs = now;
+      }
+    }
+
+    vTaskDelayUntil(&lastWake, pdMS_TO_TICKS(GamepadQT::GAMEPAD_POLL_MS));
   }
 }
 
@@ -395,9 +630,9 @@ void setup() {
   // when that task starts, with no delay at all - if it ran concurrently
   // with WiFi/ESP-NOW bring-up here, addPeer() could silently fail (ESP-NOW
   // not yet initialized) while the code still declared the controller
-  // "paired". With PERMANENT_PAIRING_MODE builds (the default envs) there
-  // is no timeout-driven self-correction from that state, so it would be a
-  // silent, permanent dead end after any reset. Doing this first removes
+  // "paired", with no timeout-driven self-correction from that state (see
+  // unpair(), only ever called from the 'p' serial command) - so it would
+  // be a silent, permanent dead end after any reset. Doing this first removes
   // the race entirely; queues/event group above must exist first since
   // onRecv() (registered below) pushes into rxQueue.
   WiFi.mode(WIFI_STA);
@@ -414,6 +649,16 @@ void setup() {
     esp_now_register_recv_cb(onRecv);
     esp_now_register_send_cb(OnDataSent);
     addPeer(broadcastMAC);
+  }
+
+  // GamepadQT is optional hardware - not every controller unit has one
+  // attached, and the relay firmware must work fine without it, so a
+  // missing/failed gamepad does not affect initSuccess.
+  gamepadAvailable = gamepad.begin();
+  if (gamepadAvailable) {
+    Serial.println("[GAMEPAD] Found and calibrated - debug task starting");
+  } else {
+    Serial.println("[GAMEPAD] Not found at startup - independent-mode debug task disabled");
   }
 
   // Create FreeRTOS tasks
@@ -485,6 +730,23 @@ void setup() {
   if (taskCreated != pdPASS) {
     Serial.println("[RTOS] Failed to create pairing task");
     initSuccess = false;
+  }
+
+  // Create independent control task (Priority 0 - lowest). Only created if
+  // the gamepad actually responded; its absence is not a fatal init
+  // failure - the relay firmware works fine without one attached.
+  if (gamepadAvailable) {
+    taskCreated = xTaskCreate(
+      independentControlTask,  // Task function
+      "IndependentControl",    // Task name
+      3072,                    // Stack size (bytes)
+      NULL,                    // Parameters
+      0,                       // Priority (lowest)
+      NULL                     // Task handle
+    );
+    if (taskCreated != pdPASS) {
+      Serial.println("[RTOS] Failed to create independent control task");
+    }
   }
 
   // Check if all FreeRTOS/WiFi/ESP-NOW initialization succeeded

@@ -53,8 +53,7 @@ unsigned long lastPairAttempt;
 // Heartbeat tracking
 unsigned long lastHeartbeatSent = 0;
 unsigned long lastHeartbeatReceived = 0;
-const unsigned long HEARTBEAT_INTERVAL = 2000;      // Send every 5s
-const unsigned long HEARTBEAT_TIMEOUT = 5000;      // Unpair after 15s no response
+const unsigned long HEARTBEAT_INTERVAL = 2000;      // Send every 2s
 
 // Debug mode - default false
 bool debugMode = false;

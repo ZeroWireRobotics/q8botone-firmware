@@ -446,6 +446,10 @@ uint8_t q8Dynamixel::parseFrame(const uint8_t* buf, size_t bufCapacity) {
       else warnJumpBlocked();
       return 0;
 
+    case CmdType::GREET:
+      greet();
+      return 0;
+
     case CmdType::GAIT_RUN: {
       if (payloadLen < 2) return 0;
       if (_gaitRunner) _gaitRunner->start(payload[0], payload[1]);

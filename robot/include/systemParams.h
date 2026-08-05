@@ -51,7 +51,7 @@ uint8_t serverMac[6];  // This us. The robot is the server.
 
 // Heartbeat tracking (robot side)
 unsigned long lastHeartbeatReceived = 0;
-const unsigned long HEARTBEAT_TIMEOUT_ROBOT = 5000;  // Unpair after 20s no heartbeat from controller
+const unsigned long HEARTBEAT_TIMEOUT_ROBOT = 5000;  // How long since the last heartbeat before robotStateTask's STATE_PAIRED LED stops showing "alive"
 
 // Last DATA message received — used to guard battery reads from motor-load noise
 unsigned long lastDataReceived = 0;

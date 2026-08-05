@@ -273,36 +273,6 @@ void espnowRxTask(void* parameter) {
   }
 }
 
-// FreeRTOS Task: Heartbeat Monitor (Priority 2)
-void heartbeatMonitorTask(void* parameter) {
-  TickType_t lastWake = xTaskGetTickCount();
-
-  while (true) {
-    // Only monitor heartbeat when paired
-    if (paired) {
-      unsigned long now = millis();
-
-      // Avoid underflow: only check timeout if now >= lastHeartbeatReceived
-      if (now >= lastHeartbeatReceived) {
-        unsigned long timeSinceLastMsg = now - lastHeartbeatReceived;
-
-        // Check for timeout (only in auto-pairing mode)
-#ifndef PERMANENT_PAIRING_MODE
-        if (timeSinceLastMsg > HEARTBEAT_TIMEOUT_ROBOT) {
-          queuePrint(MSG_DEBUG, "[HEARTBEAT] Timeout detected (%lums since last message)\n", timeSinceLastMsg);
-          q8.toggleTorque(0);        // Disable torque hardware
-          q8.resetTorqueState();     // Sync internal flag to match disabled state
-          unpair();
-        }
-#endif
-      }
-    }
-
-    // Check every 1 second
-    vTaskDelayUntil(&lastWake, pdMS_TO_TICKS(1000));
-  }
-}
-
 // FreeRTOS Task: Robot State Manager (Priority 1)
 void robotStateTask(void* parameter) {
   TickType_t lastStateChange = xTaskGetTickCount();
@@ -543,7 +513,6 @@ void serialOutputTask(void* parameter) {
     }
 
     // Check for incoming serial commands
-#ifdef PERMANENT_PAIRING_MODE
     if (Serial.available()) {
       char c = Serial.read();
       if (c == 'p') {
@@ -556,7 +525,6 @@ void serialOutputTask(void* parameter) {
         queuePrint(MSG_INFO, "Debug mode: %s\n", debugMode ? "ON" : "OFF");
       }
     }
-#endif
 
     // Low priority - yield to other tasks
     vTaskDelay(pdMS_TO_TICKS(10));
@@ -630,9 +598,10 @@ void setup() {
   // soon as that task starts - if it ran concurrently with WiFi/ESP-NOW
   // bring-up here (which can take 100ms+), addPeer() could silently fail
   // (ESP-NOW not yet initialized) while the code still declared the robot
-  // "paired". With PERMANENT_PAIRING_MODE builds (the default envs) there
-  // is no timeout-driven self-correction from that state, so it would be
-  // a silent, permanent dead end after any reset. Doing this first removes
+  // "paired", with no timeout-driven self-correction from that state (see
+  // unpair(), only ever called from the 'p' serial command or a manual
+  // pairing-reset trigger) - so it would be a silent, permanent dead end
+  // after any reset. Doing this first removes
   // the race entirely; queues/event group above must exist first since
   // onRecv() (registered below) pushes into rxQueue.
   WiFi.mode(WIFI_AP_STA);
@@ -673,20 +642,6 @@ void setup() {
   );
   if (taskCreated != pdPASS) {
     Serial.println("[RTOS] Failed to create ESP-NOW RX task");
-    initSuccess = false;
-  }
-
-  // Create heartbeat monitor task (Priority 2)
-  taskCreated = xTaskCreate(
-    heartbeatMonitorTask, // Task function
-    "HeartbeatMonitor",   // Task name
-    2048,                 // Stack size (bytes)
-    NULL,                 // Parameters
-    2,                    // Priority (medium - monitors connection)
-    NULL                  // Task handle
-  );
-  if (taskCreated != pdPASS) {
-    Serial.println("[RTOS] Failed to create heartbeat monitor task");
     initSuccess = false;
   }
 
