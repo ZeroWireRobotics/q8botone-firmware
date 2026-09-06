@@ -10,6 +10,8 @@
 #include "protocol.h"
 #include "gamepadQT.h"
 #include "independentControl.h"
+#include "pinMapping.h"
+#include "RGBManager.h"
 
 // Independent (gamepad) mode vs relay mode - see independentControlTask()
 // and commandForwardingTask()'s HOST_CONNECTED handling. Independent by
@@ -30,10 +32,34 @@ const uint32_t PAIRING_TIMEOUT_MS = 30000;
 // case both leave this false, retrying forever as before.
 bool manualPairingEntry = false;
 
+// Default status-LED brightness (0-255) - full brightness, since this LED
+// is the controller's only pairing/connection indicator and there's no
+// upstream command to change it (unlike the robot's own LED, which defaults
+// dimmer - see q8bot_robot's DEFAULT_LED_BRIGHTNESS).
+const uint8_t DEFAULT_LED_BRIGHTNESS = 255;
+
+// Physical pairing button (IO9, active-low) - separate trigger from the
+// gamepad START+SELECT combo above, same enterPairingModeManually() path
+// and PAIRING_TIMEOUT_MS bound. See rgbStatusTask().
+const uint32_t BUTTON_PAIRING_HOLD_MS = 3000;
+const uint32_t BUTTON_DEBOUNCE_MS = 30;
+// Tolerates a brief mid-hold contact drop-out (switch bounce, vibration, a
+// marginal connection) without restarting the 3s count - only a release
+// that stays released for this long cancels an in-progress hold.
+const uint32_t BUTTON_RELEASE_GRACE_MS = 150;
+
+// Set/cleared by pairingTask() each time it decides whether to send a
+// broadcast this cycle - lets rgbStatusTask() show the "searching" rainbow
+// for as long as pairing is actually being attempted (covers both the
+// unbounded fresh-boot case and the bounded manual-entry case) and turn it
+// off once a bounded window gives up.
+volatile bool pairingBroadcasting = false;
+
 // Initialize global objects
 esp_now_peer_info_t peerInfo;
 Preferences prefs;
 macStorage storage;
+RGBManager rgb(RGB_PIN);
 GamepadQT gamepad;
 bool gamepadAvailable = false;  // Set in setup() - relay firmware works fine without one attached
 
@@ -406,6 +432,8 @@ void pairingTask(void *param) {
         broadcastStartMs = 0;  // Not a bounded window (fresh boot / 'p' command) - broadcast forever
       }
 
+      pairingBroadcasting = shouldBroadcast;
+
       if (shouldBroadcast) {
         // Send pairing broadcast every 2s
         if (debugQueue != NULL) {
@@ -428,6 +456,7 @@ void pairingTask(void *param) {
       vTaskDelayUntil(&lastWake, pdMS_TO_TICKS(2000));
     } else {
       broadcastStartMs = 0;
+      pairingBroadcasting = false;
 
       // Block until unpaired event
       EventBits_t bits = xEventGroupWaitBits(
@@ -441,6 +470,93 @@ void pairingTask(void *param) {
       // Reset timing after unpair event
       lastWake = xTaskGetTickCount();
     }
+  }
+}
+
+// ============================================================================
+// FreeRTOS Task: RGB Status + Pairing Button (Priority 0 - lowest). Always
+// created (unlike independentControlTask, which needs a gamepad) since the
+// button and LED are fixed hardware on every unit. Mirrors q8bot_robot's
+// RGB status language (main.cpp's STATE_UNPAIRED/STATE_PAIRED handling) so
+// both ends of the link read the same way: rainbow while searching for a
+// peer, solid blue once paired with a live heartbeat, blinking blue if the
+// heartbeat has gone stale, off once a bounded manual pairing window gives
+// up with no result.
+// ============================================================================
+void rgbStatusTask(void* parameter) {
+  TickType_t lastWake = xTaskGetTickCount();
+  const uint32_t TICK_MS = 50;
+
+  bool buttonRaw = false;
+  bool buttonDebounced = false;
+  uint32_t lastButtonChangeMs = 0;
+  uint32_t buttonPressStartMs = 0;  // 0 = no hold currently being counted
+  bool longPressLatched = false;  // Cleared on a confirmed release so each hold only fires once
+  uint32_t releasePendingMs = 0;  // 0 = not in a post-release grace window (see BUTTON_RELEASE_GRACE_MS)
+
+  uint16_t hue = 0;
+
+  while (1) {
+    uint32_t now = millis();
+
+    // --- Pairing button: debounce + long-press detection (active-low) ---
+    bool raw = (digitalRead(BUTTON_PIN) == LOW);
+    if (raw != buttonRaw) {
+      buttonRaw = raw;
+      lastButtonChangeMs = now;
+    }
+    if ((now - lastButtonChangeMs) >= BUTTON_DEBOUNCE_MS && buttonDebounced != buttonRaw) {
+      buttonDebounced = buttonRaw;
+      if (buttonDebounced) {
+        // (Re-)pressed. If this follows a release that's still within its
+        // grace window, treat it as the same hold attempt rather than
+        // restarting the 3s count - a mechanical switch can momentarily
+        // drop contact mid-hold (bounce, vibration, a marginal connection)
+        // without the user actually letting go.
+        if (releasePendingMs == 0) {
+          buttonPressStartMs = now;
+        }
+        releasePendingMs = 0;
+      } else {
+        // Debounced release - don't cancel the in-progress hold yet, only
+        // start the grace window. Confirmed below once the window expires.
+        releasePendingMs = now;
+      }
+    }
+
+    // Grace window expired with no re-press - now it's a genuine release.
+    if (releasePendingMs != 0 && (now - releasePendingMs) >= BUTTON_RELEASE_GRACE_MS) {
+      releasePendingMs = 0;
+      longPressLatched = false;
+      buttonPressStartMs = 0;
+    }
+
+    if (buttonDebounced && !longPressLatched && buttonPressStartMs != 0 &&
+        (now - buttonPressStartMs) >= BUTTON_PAIRING_HOLD_MS) {
+      longPressLatched = true;
+      queuePrint(MSG_INFO, "[BUTTON] Held %lums - forcing pairing mode\n", (unsigned long)BUTTON_PAIRING_HOLD_MS);
+      enterPairingModeManually();
+    }
+
+    // --- RGB status ---
+    if (paired) {
+      bool heartbeatAlive = (now - lastHeartbeatReceived) <= HEARTBEAT_TIMEOUT_CONTROLLER;
+      if (heartbeatAlive) {
+        rgb.setColor(0, 0, 255);
+      } else {
+        bool blinkOn = (now % 2000) < 500;
+        rgb.setColor(0, 0, blinkOn ? 255 : 0);
+      }
+    } else if (pairingBroadcasting) {
+      // Rainbow cycle, ~13s per full revolution at this tick rate - matches
+      // q8bot_robot's STATE_UNPAIRED pace.
+      rgb.setHue(hue);
+      hue += 256;
+    } else {
+      rgb.off();
+    }
+
+    vTaskDelayUntil(&lastWake, pdMS_TO_TICKS(TICK_MS));
   }
 }
 
@@ -651,6 +767,12 @@ void setup() {
     addPeer(broadcastMAC);
   }
 
+  // Pairing button (IO9, active-low external pull-up) + RGB status LED
+  // (IO0, SK6812) - fixed hardware on every unit, unlike the optional
+  // gamepad below.
+  pinMode(BUTTON_PIN, INPUT_PULLUP);
+  rgb.begin(storage.loadLedBrightness(DEFAULT_LED_BRIGHTNESS));
+
   // GamepadQT is optional hardware - not every controller unit has one
   // attached, and the relay firmware must work fine without it, so a
   // missing/failed gamepad does not affect initSuccess.
@@ -729,6 +851,21 @@ void setup() {
   );
   if (taskCreated != pdPASS) {
     Serial.println("[RTOS] Failed to create pairing task");
+    initSuccess = false;
+  }
+
+  // Create RGB status + pairing button task (Priority 0 - lowest). Always
+  // created - the button and LED are fixed hardware, unlike the gamepad.
+  taskCreated = xTaskCreate(
+    rgbStatusTask,      // Task function
+    "RGBStatus",        // Task name
+    3072,               // Stack size (bytes)
+    NULL,               // Parameters
+    0,                  // Priority (lowest)
+    NULL                // Task handle
+  );
+  if (taskCreated != pdPASS) {
+    Serial.println("[RTOS] Failed to create RGB status task");
     initSuccess = false;
   }
 

@@ -13,6 +13,7 @@ using namespace ControlTableItem;
 
 class RGBManager;  // Forward declaration - see RGBManager.h
 class GaitRunner;  // Forward declaration - see gaitRunner.h
+class macStorage;  // Forward declaration - see macStorage.h
 
 class q8Dynamixel
 {
@@ -21,6 +22,7 @@ class q8Dynamixel
     void begin();
     void attachRGB(RGBManager* rgb);  // Optional - lets jump() dim the LED during its current spike
     void attachGaitRunner(GaitRunner* gaitRunner);  // Lets parseFrame() dispatch GAIT_RUN/GAIT_STOP
+    void attachStorage(macStorage* storage);  // Lets parseFrame() persist LED_BRIGHTNESS to NVS
     bool checkComms(uint8_t ID);
     bool commStart();
     uint16_t checkBattery();
@@ -75,6 +77,7 @@ class q8Dynamixel
     bool _jumpEnabled = true;
     RGBManager* _rgb = nullptr;
     GaitRunner* _gaitRunner = nullptr;
+    macStorage* _storage = nullptr;
     int32_t _deg2Dxl(float deg);
     float _dxl2Deg(int32_t dxlRaw);
     // Plays a frame table at a constant per-frame delay. Used by trotDemo().

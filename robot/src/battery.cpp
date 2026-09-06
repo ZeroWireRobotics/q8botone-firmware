@@ -79,3 +79,18 @@ uint16_t batteryGetPercent() {
   if (percent > 100.0f) percent = 100.0f;
   return static_cast<uint16_t>(percent + 0.5f);
 }
+
+ChargeState batteryGetChargeState() {
+  charger.readChargeStatusReg();
+  if (!charger.getPG_STAT()) return CHARGE_NONE;  // no valid source plugged in
+
+  // BQ25887 CHRG_STAT[2:0]: 0=Not Charging, 1=Trickle, 2=Pre-charge,
+  // 3=Fast Charge (CC), 4=Taper Charge (CV), 5=Reserved,
+  // 6=Top-off Timer Active, 7=Termination Done. Source present but "Not
+  // Charging" (0) still reads as done/maintaining for this coarse 3-state
+  // readout - the RGB indicator doesn't need to distinguish that from an
+  // actual termination-done fault.
+  uint8_t chrgStat = charger.getCHRG_STAT();
+  if (chrgStat == 0 || chrgStat == 7) return CHARGE_DONE;
+  return CHARGE_ACTIVE;
+}

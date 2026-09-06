@@ -28,6 +28,7 @@ enum class CmdType : uint8_t {          // host -> robot
   GAIT_STOP       = 0x07,  // no payload - stop autonomous gait, hand control back to raw MOVE
   GREET           = 0x08,  // no payload - scripted greeting sequence, runs entirely on the robot
   HOST_CONNECTED  = 0x09,  // no payload - controller-local only, never forwarded to the robot
+  LED_BRIGHTNESS  = 0x0A,  // {brightness: uint8, 0-255} - sets & persists the robot's RGB LED brightness
 };
 
 // Canonical direction ordering for GAIT_RUN's direction_id (0-11). Must

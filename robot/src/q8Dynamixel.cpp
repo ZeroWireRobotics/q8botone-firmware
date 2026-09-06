@@ -10,6 +10,7 @@
 #include <RGBManager.h>
 #include <protocol.h>
 #include <gaitRunner.h>
+#include <macStorage.h>
 
 using namespace ControlTableItem;
 
@@ -25,6 +26,10 @@ void q8Dynamixel::attachRGB(RGBManager* rgb){
 
 void q8Dynamixel::attachGaitRunner(GaitRunner* gaitRunner){
   _gaitRunner = gaitRunner;
+}
+
+void q8Dynamixel::attachStorage(macStorage* storage){
+  _storage = storage;
 }
 
 void q8Dynamixel::begin(){
@@ -459,6 +464,13 @@ uint8_t q8Dynamixel::parseFrame(const uint8_t* buf, size_t bufCapacity) {
     case CmdType::GAIT_STOP:
       if (_gaitRunner) _gaitRunner->stop();
       return 0;
+
+    case CmdType::LED_BRIGHTNESS: {
+      if (payloadLen < 1) return 0;
+      if (_rgb) _rgb->setBrightness(payload[0]);
+      if (_storage) _storage->saveLedBrightness(payload[0]);
+      return 0;
+    }
 
     default:
       return 0;

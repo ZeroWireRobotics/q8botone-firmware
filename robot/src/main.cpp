@@ -43,6 +43,26 @@ EventGroupHandle_t eventGroup = NULL;
 // Robot State
 volatile RobotState robotState = STATE_UNPAIRED;
 
+// Physical pairing button (IO9, active-low, new PCB revision) - long-press
+// forces a re-pair, mirroring q8bot_controller's button. Unlike a fresh/
+// never-paired boot (which accepts a PAIRING request forever - see
+// pairingAcceptingRequests's default below), a manual re-pair is bounded to
+// PAIRING_TIMEOUT_MS: if nothing pairs within the window, the robot stops
+// accepting new PAIRING requests (until the next long-press or a power
+// cycle) so a stray broadcast reaching it afterward can't silently claim
+// it. See robotStateTask()'s STATE_UNPAIRED case.
+const uint32_t BUTTON_PAIRING_HOLD_MS = 3000;
+const uint32_t BUTTON_DEBOUNCE_MS = 30;
+const uint32_t PAIRING_TIMEOUT_MS = 30000;
+bool manualPairingEntry = false;
+volatile bool pairingAcceptingRequests = true;
+
+// Default RGB LED brightness (0-255) used only until a host sends
+// LED_BRIGHTNESS at least once (see q8Dynamixel.cpp's parseFrame) - 50%,
+// dimmer than the controller's own status LED default since this one sits
+// right in front of the robot rather than in a handheld controller.
+const uint8_t DEFAULT_LED_BRIGHTNESS = 128;
+
 
 // ============================================================================
 // Helper Functions
@@ -74,11 +94,22 @@ void unpair() {
   memset(clientMac, 0, sizeof(clientMac));
   paired = false;
   started = false;
+  pairingAcceptingRequests = true;  // Reopen acceptance every time we unpair
 
   // Update robot state and event group
   robotState = STATE_UNPAIRED;
   xEventGroupClearBits(eventGroup, EVENT_PAIRED | EVENT_STARTED);
   xEventGroupSetBits(eventGroup, EVENT_UNPAIRED);
+}
+
+// Manual pairing-mode entry (button long-press) - unlike the pre-existing
+// 'p' serial command, this bounds the resulting acceptance window to
+// PAIRING_TIMEOUT_MS (see robotStateTask()'s STATE_UNPAIRED case).
+void enterPairingModeManually() {
+  manualPairingEntry = true;
+  q8.toggleTorque(0);        // Disable torque hardware
+  q8.resetTorqueState();     // Sync internal flag to match disabled state
+  unpair();
 }
 
 
@@ -130,7 +161,7 @@ void espnowRxTask(void* parameter) {
       uint8_t msgType = msg.data[0];
 
       // Handle PAIRING message
-      if (msgType == PAIRING && !paired) {
+      if (msgType == PAIRING && !paired && pairingAcceptingRequests) {
         // Validate PAIRING message length
         if (msg.len < sizeof(PairingMessage)) continue;
 
@@ -150,6 +181,7 @@ void espnowRxTask(void* parameter) {
         addPeer(clientMac);
         esp_now_send(clientMac, (uint8_t*)&pairingData, sizeof(pairingData));
         paired = true;
+        manualPairingEntry = false;  // Successful pair closes any bounded window
         lastHeartbeatReceived = millis();
 
         // Update robot state and event group
@@ -279,12 +311,21 @@ void robotStateTask(void* parameter) {
   unsigned long lastActivity = 0;
   bool firstRun = true;  // Check saved MAC on first iteration
   uint16_t hue = 0;      // Tracks rainbow position for STATE_UNPAIRED
+  uint32_t manualPairingStartMs = 0;  // 0 = no bounded window currently running
+
+  // Pairing button (IO9) debounce state
+  bool buttonRaw = false;
+  bool buttonDebounced = false;
+  uint32_t lastButtonChangeMs = 0;
+  uint32_t buttonPressStartMs = 0;
+  bool longPressLatched = false;  // Cleared on release so each hold only fires once
 
   // Battery monitoring state
   // Stages: 3 = normal, 2 = low (<20%), 1 = critical (<10%), 0 = stop (<5%)
   uint8_t batteryStage = 3;
   bool jumpEnabledPrev = true;  // Tracks last setJumpEnabled() call - reversible, unlike batteryStage
   unsigned long lastBatteryCheck = 0;
+  ChargeState chargeState = CHARGE_NONE;
 
   // Give other tasks time to start (especially serialOutputTask)
   vTaskDelay(pdMS_TO_TICKS(100));
@@ -322,6 +363,32 @@ void robotStateTask(void* parameter) {
 
     unsigned long now = millis();
     RobotState currentState = robotState;
+
+    // Pairing button: debounce + long-press detection (active-low). Runs
+    // regardless of current state - a stale pairing to the wrong controller
+    // should be forceable from STATE_PAIRED/STATE_STARTED too, not just
+    // STATE_UNPAIRED.
+    {
+      bool raw = (digitalRead(BUTTON_PIN) == LOW);
+      if (raw != buttonRaw) {
+        buttonRaw = raw;
+        lastButtonChangeMs = now;
+      }
+      if ((now - lastButtonChangeMs) >= BUTTON_DEBOUNCE_MS && buttonDebounced != buttonRaw) {
+        buttonDebounced = buttonRaw;
+        if (buttonDebounced) {
+          buttonPressStartMs = now;
+        } else {
+          longPressLatched = false;
+        }
+      }
+
+      if (buttonDebounced && !longPressLatched && (now - buttonPressStartMs) >= BUTTON_PAIRING_HOLD_MS) {
+        longPressLatched = true;
+        queuePrint(MSG_INFO, "[BUTTON] Held %lums - forcing pairing mode\n", (unsigned long)BUTTON_PAIRING_HOLD_MS);
+        enterPairingModeManually();
+      }
+    }
 
 #if !BENCH_DISABLE_POWER_MGMT
     // Backup demo trigger: double-tap the power button while torque is off
@@ -396,21 +463,86 @@ void robotStateTask(void* parameter) {
             break;
         }
       }
+
+      ChargeState newChargeState = batteryGetChargeState();
+      if (newChargeState != chargeState) {
+        chargeState = newChargeState;
+        switch (chargeState) {
+          case CHARGE_NONE:
+            queuePrint(MSG_INFO, "[BATTERY] Charger disconnected\n");
+            break;
+          case CHARGE_ACTIVE:
+            queuePrint(MSG_INFO, "[BATTERY] Charging (%d%%)\n", pct);
+            break;
+          case CHARGE_DONE:
+            queuePrint(MSG_INFO, "[BATTERY] Charge complete (%d%%)\n", pct);
+            break;
+        }
+      }
+    }
+
+    // Charging RGB override - takes priority over the pairing/idle colors
+    // below (rainbow search, solid/blinking blue) since a docked, charging
+    // robot is the most common idle state. Deliberately excluded from
+    // STATE_STARTED: that color already carries the more operationally
+    // useful torque/battery-stage signal, and charging-while-active is an
+    // edge case not worth stepping on it for.
+    bool chargeOverride = (chargeState != CHARGE_NONE) && (currentState != STATE_STARTED);
+    uint8_t chargeR = 0, chargeG = 0, chargeB = 0;
+    if (chargeOverride) {
+      if (chargeState == CHARGE_DONE) {
+        chargeG = 255;  // solid green - full and maintaining, matches the
+                         // conventional "green = done" charger LED color
+      } else {
+        // Breathing amber - actively topping up.
+        const uint16_t periodMs = 2000;
+        float phase = fmodf((float)now, (float)periodMs) / (float)periodMs;
+        float level = (sinf(2.0f * PI * phase - PI / 2.0f) + 1.0f) / 2.0f;
+        chargeR = (uint8_t)(255 * level);
+        chargeG = (uint8_t)(120 * level);
+      }
     }
 
     switch (currentState) {
       case STATE_UNPAIRED: {
-        // Rainbow cycle on RGB LED every loop tick (~100ms per step)
-        rgb.setHue(hue);
-        hue += 512;  // Full cycle in ~13s
+        // A manually-triggered (button) re-pair is bounded to
+        // PAIRING_TIMEOUT_MS - a fresh/never-paired boot leaves
+        // manualPairingEntry false and keeps accepting forever, same as
+        // before this button existed.
+        if (manualPairingEntry) {
+          if (manualPairingStartMs == 0) manualPairingStartMs = now;
+          if (pairingAcceptingRequests && (now - manualPairingStartMs) >= PAIRING_TIMEOUT_MS) {
+            pairingAcceptingRequests = false;
+            manualPairingEntry = false;
+            manualPairingStartMs = 0;
+            queuePrint(MSG_INFO, "[PAIRING] No response after %lums - giving up (hold the button again to retry)\n",
+                       (unsigned long)PAIRING_TIMEOUT_MS);
+          }
+        } else {
+          manualPairingStartMs = 0;
+        }
 
-        // Slow blink every 2 seconds
-        if (now - lastActivity >= 2000) {
-          lastActivity = now;
-          digitalWrite(LED_PIN, HIGH);
-          vTaskDelay(pdMS_TO_TICKS(200));
-          digitalWrite(LED_PIN, LOW);
-          queuePrint(MSG_DEBUG, "[PAIRING] Waiting for pairing...\n");
+        if (pairingAcceptingRequests) {
+          if (chargeOverride) {
+            rgb.setColor(chargeR, chargeG, chargeB);
+          } else {
+            // Rainbow cycle on RGB LED every loop tick (~100ms per step)
+            rgb.setHue(hue);
+            hue += 512;  // Full cycle in ~13s
+          }
+
+          // Slow blink every 2 seconds
+          if (now - lastActivity >= 2000) {
+            lastActivity = now;
+            digitalWrite(LED_PIN, HIGH);
+            vTaskDelay(pdMS_TO_TICKS(200));
+            digitalWrite(LED_PIN, LOW);
+            queuePrint(MSG_DEBUG, "[PAIRING] Waiting for pairing...\n");
+          }
+        } else if (chargeOverride) {
+          rgb.setColor(chargeR, chargeG, chargeB);
+        } else {
+          rgb.off();
         }
         break;
       }
@@ -421,13 +553,17 @@ void robotStateTask(void* parameter) {
         // (e.g. right after pairing, or if the link has gone quiet). A
         // blink (not a sine breathe) survives the ~1s vTaskDelay block
         // below without visibly stuttering.
-        bool heartbeatAlive = (now >= lastHeartbeatReceived) &&
-                               (now - lastHeartbeatReceived <= HEARTBEAT_TIMEOUT_ROBOT);
-        if (heartbeatAlive) {
-          rgb.setColor(0, 0, 255);
+        if (chargeOverride) {
+          rgb.setColor(chargeR, chargeG, chargeB);
         } else {
-          bool blinkOn = (now % 2000) < 500;
-          rgb.setColor(0, 0, blinkOn ? 255 : 0);
+          bool heartbeatAlive = (now >= lastHeartbeatReceived) &&
+                                 (now - lastHeartbeatReceived <= HEARTBEAT_TIMEOUT_ROBOT);
+          if (heartbeatAlive) {
+            rgb.setColor(0, 0, 255);
+          } else {
+            bool blinkOn = (now % 2000) < 500;
+            rgb.setColor(0, 0, blinkOn ? 255 : 0);
+          }
         }
 
         // Double blink every 2 seconds (waiting for torque enable)
@@ -554,6 +690,7 @@ void gaitRunnerTask(void* parameter) {
 void setup() {
   Serial.begin(115200);
   pinMode(LED_PIN, OUTPUT);
+  pinMode(BUTTON_PIN, INPUT_PULLUP);  // Pairing button - independent of the power latch above
 
 #if BENCH_DISABLE_POWER_MGMT
   // Bench mode - skip the button-hold requirement and latch power on
@@ -568,7 +705,7 @@ void setup() {
   }
   Serial.println("[POWER] Latched on");
 #endif
-  rgb.begin();
+  rgb.begin(storage.loadLedBrightness(DEFAULT_LED_BRIGHTNESS));
 
   bool initSuccess = true;
 
@@ -695,6 +832,7 @@ void setup() {
   q8.begin();
   q8.attachRGB(&rgb);
   q8.attachGaitRunner(&gaitRunner);
+  q8.attachStorage(&storage);
 }
 
 // Loop does nothing - all work done in FreeRTOS tasks

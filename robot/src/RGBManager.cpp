@@ -3,9 +3,9 @@
 RGBManager::RGBManager(uint8_t pin)
   : _pixel(1, pin, NEO_GRBW + NEO_KHZ800) {}
 
-void RGBManager::begin() {
+void RGBManager::begin(uint8_t brightness) {
   _pixel.begin();
-  _pixel.setBrightness(64);
+  _pixel.setBrightness(brightness);
   off();
 }
 
@@ -21,5 +21,10 @@ void RGBManager::setHue(uint16_t hue) {
 
 void RGBManager::off() {
   _pixel.setPixelColor(0, 0);
+  _pixel.show();
+}
+
+void RGBManager::setBrightness(uint8_t brightness) {
+  _pixel.setBrightness(brightness);
   _pixel.show();
 }

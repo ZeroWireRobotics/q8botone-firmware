@@ -54,6 +54,7 @@ unsigned long lastPairAttempt;
 unsigned long lastHeartbeatSent = 0;
 unsigned long lastHeartbeatReceived = 0;
 const unsigned long HEARTBEAT_INTERVAL = 2000;      // Send every 2s
+const unsigned long HEARTBEAT_TIMEOUT_CONTROLLER = 5000;  // How long since the last heartbeat before the RGB status LED stops showing "alive" (matches robot's HEARTBEAT_TIMEOUT_ROBOT)
 
 // Debug mode - default false
 bool debugMode = false;

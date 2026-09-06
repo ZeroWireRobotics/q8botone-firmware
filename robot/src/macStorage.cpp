@@ -27,3 +27,16 @@ void macStorage::clearPeerMAC() {
   _prefs.remove(_macKey);
   _prefs.end();
 }
+
+uint8_t macStorage::loadLedBrightness(uint8_t defaultValue) {
+  _prefs.begin(_namespace, false);
+  uint8_t brightness = _prefs.getUChar(_ledBrightKey, defaultValue);
+  _prefs.end();
+  return brightness;
+}
+
+void macStorage::saveLedBrightness(uint8_t brightness) {
+  _prefs.begin(_namespace, false);
+  _prefs.putUChar(_ledBrightKey, brightness);
+  _prefs.end();
+}

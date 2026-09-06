@@ -12,3 +12,6 @@ const uint8_t RGB_PIN = 0;
 // Power circuit (V3.0.2 PCB)
 const uint8_t SENSE_PIN = 1;   // IO1 = BTN_SEN
 const uint8_t LATCH_PIN = 10;  // IO10 = LATCH
+
+// Pairing button (new PCB revision) - active low, long-press forces a re-pair
+const uint8_t BUTTON_PIN = 9;
