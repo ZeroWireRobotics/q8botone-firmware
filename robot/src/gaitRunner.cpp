@@ -33,6 +33,15 @@ void GaitRunner::tick(){
   if (table.count == 0) return;
 
   const GaitFrame& frame = table.frames[_phaseIndex % table.count];
+
+  // Try for the servo bus rather than waiting on it. jump()/greet() hold it
+  // for seconds, and a gait that queued up behind one would come back and
+  // replay every missed frame at once. Skipping a frame just means the gait
+  // pauses for as long as the other operation takes, which is what should
+  // happen - so don't advance the phase either.
+  if (!_q8.lockBus(pdMS_TO_TICKS(2))) return;
   _q8.bulkWriteDeg(frame.degs);
+  _q8.unlockBus();
+
   _phaseIndex = (_phaseIndex + 1) % table.count;
 }

@@ -113,17 +113,56 @@ void enterPairingModeManually() {
 }
 
 
-void addElementToArray(uint16_t*& array, size_t& currentSize, uint16_t newElement) {
-    // Allocate a new array with one extra element
-    uint16_t* newArray = new uint16_t[currentSize + 1];
-    newArray[0] = newElement;
-    memcpy(newArray + 1, array, currentSize * sizeof(uint16_t));
-    // Delete the old array (free the memory)
-    delete[] array;
-    // Update the original pointer and size
-    array = newArray;
-    currentSize++;
+// ============================================================================
+// Boot-time battery check (setup() only) - gives an immediate visual read of
+// charge level via one slow breathe, before robotStateTask's RGB (pairing
+// rainbow, etc.) takes over. Thresholds are independent of batteryStage's
+// (robotStateTask's runtime 20/10/5 bands, used for jump-gating and the
+// STATE_STARTED breathe/pulse) - this is a coarser one-shot readout, not a
+// standing operational gate.
+// ============================================================================
+enum BootBatteryBand {
+  BOOT_BATTERY_GREEN,     // 60-100%
+  BOOT_BATTERY_YELLOW,    // 30-60%
+  BOOT_BATTERY_ORANGE,    // 10-30%
+  BOOT_BATTERY_RED,       // 5-10% - still boots normally
+  BOOT_BATTERY_CRITICAL,  // <5%   - too low to boot; see powerSavingTask()
+};
+
+BootBatteryBand classifyBootBattery(uint16_t pct) {
+  if (pct >= 60) return BOOT_BATTERY_GREEN;
+  if (pct >= 30) return BOOT_BATTERY_YELLOW;
+  if (pct >= 10) return BOOT_BATTERY_ORANGE;
+  if (pct >= 5)  return BOOT_BATTERY_RED;
+  return BOOT_BATTERY_CRITICAL;
 }
+
+// One slow 0->1->0 breathe (not a looping pattern - setup() moves on once
+// this returns), blocking since nothing else is running yet this early in
+// setup().
+void breatheOnce(uint8_t r, uint8_t g, uint8_t b, uint32_t durationMs) {
+  uint32_t start = millis();
+  while (true) {
+    uint32_t elapsed = millis() - start;
+    if (elapsed >= durationMs) break;
+    float level = sinf(PI * (float)elapsed / (float)durationMs);  // single hump
+    rgb.setColor((uint8_t)(r * level), (uint8_t)(g * level), (uint8_t)(b * level));
+    delay(10);
+  }
+  rgb.off();
+}
+
+// <5% at boot: warn, then hand off to powerSavingTask() instead of booting
+// normally.
+void blinkCriticalWarning() {
+  for (int i = 0; i < 3; i++) {
+    rgb.setColor(255, 0, 0);
+    delay(150);
+    rgb.off();
+    delay(150);
+  }
+}
+
 
 
 // ============================================================================
@@ -233,71 +272,6 @@ void espnowRxTask(void* parameter) {
               break;
             }
 
-            case 2: {
-              // Sync read position data
-              uint16_t* posArray = q8.syncRead();
-              if (rData != nullptr) {
-                // If rData is not nullptr, resize posArray to append new data
-                uint16_t* newData = new uint16_t[masterSize + smallerSize];
-                if (newData == nullptr) {
-                  queuePrint(MSG_DEBUG, "[ERROR] Memory allocation failed, dropping data\n");
-                  delete[] posArray;
-                  break;
-                }
-                memcpy(newData, rData, masterSize * sizeof(uint16_t));
-                for (size_t j = 0; j < smallerSize; ++j) {
-                  newData[masterSize + j] = posArray[j];
-                }
-                delete[] rData;
-                rData = newData;
-                masterSize += smallerSize;
-              } else {
-                // If rData is nullptr, initialize it for the first time
-                rData = new uint16_t[smallerSize];
-                if (rData == nullptr) {
-                  queuePrint(MSG_DEBUG, "[ERROR] Memory allocation failed\n");
-                  delete[] posArray;
-                  break;
-                }
-                for (size_t j = 0; j < smallerSize; ++j) {
-                  rData[j] = posArray[j];
-                }
-                masterSize = smallerSize;
-              }
-              delete[] posArray;
-              break;
-            }
-
-            case 3: {
-              // Send all recorded data in chunks, each wrapped in its own
-              // RECORD_DATA_REPLY frame.
-              if (rData != nullptr) {
-                queuePrint(MSG_DEBUG, "[DATA] Sending %d recorded data points\n", masterSize);
-
-                size_t totalSize = masterSize;  // total data in rData
-                // Chunk size in uint16 elements - leaves room for the 5-byte
-                // frame overhead inside the 200-byte myMsg.data buffer.
-                size_t chunkSize = 97;
-                size_t offset = 0;              // To track the position in rData
-
-                // Loop to send the data in chunks
-                while (offset < totalSize) {
-                  // If rData is less than chunk size then use its size instead.
-                  size_t currentChunkSize = (totalSize - offset < chunkSize) ? (totalSize - offset) : chunkSize;
-                  buildFrame((uint8_t)ReplyType::RECORD_DATA_REPLY,
-                             (const uint8_t*)&rData[offset],
-                             (uint8_t)(currentChunkSize * sizeof(uint16_t)),
-                             (uint8_t*)myMsg.data);
-                  // Send the chunk via ESP-NOW
-                  esp_now_send(clientMac, (uint8_t*)&myMsg, sizeof(myMsg));
-                  offset += currentChunkSize;
-                }
-                delete[] rData;
-                rData = nullptr;
-                masterSize = 0;
-              }
-              break;
-            }
           }
         }
       }
@@ -675,14 +649,41 @@ void serialOutputTask(void* parameter) {
 void gaitRunnerTask(void* parameter) {
   TickType_t lastWake = xTaskGetTickCount();
 
+  const TickType_t period = pdMS_TO_TICKS(5);
+
   while (true) {
     if (gaitRunner.isActive()) {
       gaitRunner.tick();
     }
-    vTaskDelayUntil(&lastWake, pdMS_TO_TICKS(5));
+
+    // If something long ran between ticks - a jump, a greet, or simply this
+    // task being starved by the higher-priority espnowRxTask - lastWake is
+    // now well in the past, and vTaskDelayUntil would return immediately
+    // over and over until it caught up, firing a burst of frames back to
+    // back. Resync instead: a gait resumes from where it is rather than
+    // sprinting through the backlog.
+    TickType_t now = xTaskGetTickCount();
+    if ((TickType_t)(now - lastWake) > period * 4) {
+      lastWake = now;
+    }
+    vTaskDelayUntil(&lastWake, period);
   }
 }
 
+// FreeRTOS Task: Power Saving (Priority 1) - only created when the boot
+// battery check reads critical (<5%). WiFi/ESP-NOW/motors are never brought
+// up in this mode (see setup()), so this task is the only thing running:
+// just a slow "still alive, still critical" blink until the user physically
+// powers off. The eventual goal is MCU deep sleep with regulators disabled
+// instead of this loop - deliberately not attempted yet.
+void powerSavingTask(void* parameter) {
+  while (true) {
+    rgb.setColor(255, 0, 0);
+    vTaskDelay(pdMS_TO_TICKS(50));
+    rgb.off();
+    vTaskDelay(pdMS_TO_TICKS(9950));
+  }
+}
 
 // ============================================================================
 // Arduino Setup. Configures FreeRTOS tasks, ESP-NOW, and other hardware.
@@ -706,6 +707,50 @@ void setup() {
   Serial.println("[POWER] Latched on");
 #endif
   rgb.begin(storage.loadLedBrightness(DEFAULT_LED_BRIGHTNESS));
+
+  // BQ25887 init - done here (before WiFi/FreeRTOS bring-up below) so the
+  // boot battery check right after can read a real percentage, and the
+  // very first RGB activity after boot reflects battery level rather than
+  // the pairing rainbow.
+  Wire.begin();
+  batteryInit();
+
+  // batteryInit() just enabled the BQ25887's continuous ADC - its first
+  // conversion isn't ready instantly, and reading VBAT before it completes
+  // reads back as ~0V (i.e. 0%), which would misread as critical battery
+  // every time. Give it a full cycle to settle before trusting a reading.
+  delay(1000);
+
+  bool powerSavingMode = false;
+  {
+    uint16_t bootPct = batteryGetPercent();
+    BootBatteryBand band = classifyBootBattery(bootPct);
+    Serial.printf("[BATTERY] Boot check: %d%%\n", bootPct);
+
+    switch (band) {
+      case BOOT_BATTERY_GREEN:  breatheOnce(0, 255, 0, 2000);   break;
+      case BOOT_BATTERY_YELLOW: breatheOnce(255, 255, 0, 2000); break;
+      case BOOT_BATTERY_ORANGE: breatheOnce(255, 80, 0, 2000);  break;
+      case BOOT_BATTERY_RED:    breatheOnce(255, 0, 0, 2000);   break;
+      case BOOT_BATTERY_CRITICAL:
+        Serial.println("[BATTERY] Critical at boot - entering power-saving mode");
+        blinkCriticalWarning();
+        powerSavingMode = true;
+        break;
+    }
+  }
+
+  if (powerSavingMode) {
+    // Skip WiFi/ESP-NOW/motor bring-up entirely - nothing productive can
+    // happen safely this low, and staying off the radio saves what little
+    // charge is left. The power button's hold-to-shutoff monitor is the one
+    // thing still started, so the user can power off normally.
+#if !BENCH_DISABLE_POWER_MGMT
+    power.startMonitorTask();
+#endif
+    xTaskCreate(powerSavingTask, "PowerSaving", 2048, NULL, 1, NULL);
+    return;
+  }
 
   bool initSuccess = true;
 
@@ -818,10 +863,6 @@ void setup() {
     Serial.println("[RTOS] Initialization failed - halting system");
     while(1) { delay(1000); }  // Halt system indefinitely
   }
-
-  // BQ25887 Init
-  Wire.begin();
-  batteryInit();
 
 #if !BENCH_DISABLE_POWER_MGMT
   // Start power button monitor task (must be after all xTaskCreate calls)

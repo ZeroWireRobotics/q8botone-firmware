@@ -32,7 +32,35 @@ void q8Dynamixel::attachStorage(macStorage* storage){
   _storage = storage;
 }
 
+bool q8Dynamixel::lockBus(TickType_t timeout){
+  // Before begin() there is only one task, so an uncreated lock is not a
+  // failure - it just means there is nothing to contend with yet.
+  if (_busLock == nullptr) return true;
+  return xSemaphoreTakeRecursive(_busLock, timeout) == pdTRUE;
+}
+
+void q8Dynamixel::unlockBus(){
+  if (_busLock != nullptr) xSemaphoreGiveRecursive(_busLock);
+}
+
+// Scope guard so an early return can't leave the bus locked.
+namespace {
+  class BusGuard {
+    public:
+      explicit BusGuard(q8Dynamixel& q8) : _q8(q8) { _q8.lockBus(); }
+      ~BusGuard() { _q8.unlockBus(); }
+    private:
+      q8Dynamixel& _q8;
+  };
+}
+
 void q8Dynamixel::begin(){
+  _busLock = xSemaphoreCreateRecursiveMutex();
+
+  // The two calls below are the only unguarded bus access in this file, and
+  // deliberately so: begin() runs from setup(), before any task exists, so
+  // there is nothing to contend with. Everything after startup goes through
+  // lockBus() - see the header.
   _dxl.begin(_baudrate);
   _dxl.setPortProtocolVersion(_protocolVersion);
   setOpMode();
@@ -74,6 +102,7 @@ void q8Dynamixel::begin(){
 }
 
 bool q8Dynamixel::checkComms(uint8_t ID){
+  BusGuard guard(*this);
   return _dxl.ping(ID);
 }
 
@@ -87,10 +116,12 @@ uint16_t q8Dynamixel::checkBattery(){
 }
 
 void q8Dynamixel::enableTorque(){
+  BusGuard guard(*this);
   _dxl.torqueOn(BROADCAST_ID);
 }
 
 void q8Dynamixel::disableTorque(){
+  BusGuard guard(*this);
   _dxl.torqueOff(BROADCAST_ID);
 }
 
@@ -113,6 +144,7 @@ bool q8Dynamixel::isTorqueOn() const{
 }
 
 void q8Dynamixel::setOpMode(){
+  BusGuard guard(*this);
   // Set operating mode. Torque off first if needed.
   if (!_torqueFlag){
     for (int i = 0; i < _idCount; i++){
@@ -128,6 +160,7 @@ void q8Dynamixel::setOpMode(){
 }
 
 void q8Dynamixel::setProfile(uint16_t dur){
+  BusGuard guard(*this);
   setGain(400);
   for (int i = 0; i < _idCount; i++){
     _dxl.writeControlTableItem(PROFILE_VELOCITY, _DXL[i], dur);
@@ -136,6 +169,7 @@ void q8Dynamixel::setProfile(uint16_t dur){
 }
 
 void q8Dynamixel::setGain(uint16_t p_gain){
+  BusGuard guard(*this);
   // for Time-based Extended Pos, Profile velocity is the move duration (ms).
   for (int i = 0; i < _idCount; i++){
     _dxl.writeControlTableItem(POSITION_P_GAIN, _DXL[i], p_gain);
@@ -143,6 +177,7 @@ void q8Dynamixel::setGain(uint16_t p_gain){
 }
 
 void q8Dynamixel::moveSingle(int32_t val){
+  BusGuard guard(*this);
   // 8 motors move to the same position
   for (int i = 0; i < _idCount; i++){
     _bw_data_xel[i].goal_position = val;
@@ -153,6 +188,7 @@ void q8Dynamixel::moveSingle(int32_t val){
 }
 
 void q8Dynamixel::bulkWrite(int32_t values[8]){
+  BusGuard guard(*this);
   // 8 motors move to their respective positions
   for (int i = 0; i < _idCount; i++){
     _bw_data_xel[i].goal_position = values[i];
@@ -171,12 +207,14 @@ void q8Dynamixel::bulkWriteDeg(const float degs[8]){
 }
 
 void q8Dynamixel::moveToIdle(uint16_t dur){
+  BusGuard guard(*this);  // held across the delay so the profile can't change under us
   setProfile(dur);
   delay(100);
   bulkWrite(_idleArray);
 }
 
 uint16_t* q8Dynamixel::syncRead(){
+  BusGuard guard(*this);
   // Read relevant registers from all joints into a single array
   int recv_cnt;
   size_t offset = 0;
@@ -219,6 +257,7 @@ void q8Dynamixel::warnJumpBlocked() {
 }
 
 void q8Dynamixel::jump(){
+  BusGuard guard(*this);
   // Dim the RGB LED for the duration of the jump - one less simultaneous
   // current draw during the biggest current spike this robot ever makes.
   if (_rgb) _rgb->off();
@@ -247,6 +286,7 @@ void q8Dynamixel::jump(){
 }
 
 void q8Dynamixel::greet(){
+  BusGuard guard(*this);
   // Scripted via-point greeting sequence (ported from routine_generator.py's greet()).
   static const float G1[8] = {-90, 45, -90, 45, -90, 45, -90, 45};
   static const float G2[8] = {0, 45, 0, 45, 0, 45, 0, 45};
@@ -292,6 +332,7 @@ void q8Dynamixel::_playFrames(const float frames[][8], uint8_t frameCount, uint8
 }
 
 void q8Dynamixel::trotDemo(){
+  BusGuard guard(*this);
   // Fast forward, then fast backward, using TROT_FAST's 'f' and 'b'
   // directions (ported from python-tools/q8bot/gait_generator.py's
   // generate_trot_trajectories(), via gait_manager.py's TROT_FAST params).
@@ -424,9 +465,12 @@ uint8_t q8Dynamixel::parseFrame(const uint8_t* buf, size_t bufCapacity) {
         _prevProfile = _profile;
       }
 
-      uint8_t recordFlag = payload[18];
+      // payload[18] used to be a "record this frame" flag. Recording is gone
+      // (it sync-read the bus from this task on every streamed frame), but
+      // the byte stays in the layout so the controller's own MOVE builder
+      // doesn't have to change in lockstep. Spare for the next flag.
       bulkWrite(_posArray);
-      return recordFlag ? 2 : 0;
+      return 0;
     }
 
     case CmdType::TORQUE_SET: {
@@ -444,7 +488,9 @@ uint8_t q8Dynamixel::parseFrame(const uint8_t* buf, size_t bufCapacity) {
       return 1;
 
     case CmdType::RECORD_SEND:
-      return 3;
+      // Retired. Left as a no-op rather than removed so an older host that
+      // still sends it gets ignored instead of falling through to default.
+      return 0;
 
     case CmdType::JUMP:
       if (_jumpEnabled) jump();

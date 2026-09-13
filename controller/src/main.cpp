@@ -122,6 +122,15 @@ void enterPairingModeManually() {
   unpair();
 }
 
+// True only when a host has actually opened the USB CDC port. Worth checking
+// before writing: in standalone (gamepad) mode nobody is listening, and
+// HWCDC::write() still takes its tx lock and churns the ring buffer for data
+// it then discards. Cheap insurance that gets cheaper the more the robot
+// sends back.
+static inline bool hostAttached() {
+  return (bool)Serial;
+}
+
 // Builds and sends a command frame directly to the paired robot - used by
 // independentControlTask() for all its own sends (GAIT_RUN/JUMP/GREET/
 // TORQUE_SET/GAIT_STOP). Uses its own local message buffer (not the
@@ -314,10 +323,14 @@ void espnowRxTask(void *param) {
         memcpy(&recvMsg, msg.data, sizeof(IntMessage));
         lastHeartbeatReceived = millis();  // Any DATA also counts as "alive"
 
-        // Relay the framed reply the robot built, unchanged, to the host.
+        // Relay the framed reply the robot built, unchanged, to the host -
+        // but only if there is a host. This runs in the highest-priority
+        // task, so it should do as little as possible when standalone.
         const uint8_t* buf = (const uint8_t*)recvMsg.data;
         uint8_t msgType; const uint8_t* payload; uint8_t payloadLen;
-        if (parseFrameBuf(buf, sizeof(recvMsg.data), &msgType, &payload, &payloadLen)) {
+        if (!hostAttached()) {
+          // Nothing to relay to - drop it and move on.
+        } else if (parseFrameBuf(buf, sizeof(recvMsg.data), &msgType, &payload, &payloadLen)) {
           if (serialTxMutex != NULL && xSemaphoreTake(serialTxMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
             Serial.write(buf, 3 + payloadLen + FRAME_CRC_LEN);
             xSemaphoreGive(serialTxMutex);
@@ -363,7 +376,8 @@ void serialOutputTask(void *param) {
     // Check for serial output messages (blocking with timeout)
     if (xQueueReceive(debugQueue, &msg, pdMS_TO_TICKS(10)) == pdTRUE) {
       // Print based on message type
-      bool shouldPrint = (msg.type == MSG_INFO) || (msg.type == MSG_DEBUG && debugMode);
+      bool shouldPrint = hostAttached() &&
+                         ((msg.type == MSG_INFO) || (msg.type == MSG_DEBUG && debugMode));
       if (shouldPrint && serialTxMutex != NULL && xSemaphoreTake(serialTxMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
         Serial.print(msg.text);
         xSemaphoreGive(serialTxMutex);

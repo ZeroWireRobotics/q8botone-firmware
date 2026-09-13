@@ -8,6 +8,8 @@
 
 #include <Arduino.h>
 #include <Dynamixel2Arduino.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/semphr.h>
 
 using namespace ControlTableItem;
 
@@ -47,11 +49,23 @@ class q8Dynamixel
     // Parses/validates a framed command (see protocol.h) already sitting in
     // buf (bufCapacity is a safety bound, not necessarily the real frame
     // length - the frame is self-delimiting via its own LENGTH byte).
-    // Returns 0 (no-op/handled), 1 (battery requested), 2 (move + record),
-    // or 3 (send recorded data) - same meaning as the old parseData().
+    // Returns 0 (no-op/handled) or 1 (battery requested). 2 and 3 used to
+    // mean "move + record" and "send recorded data"; recording is gone.
     uint8_t parseFrame(const uint8_t* buf, size_t bufCapacity);
 
+    // The servo bus is half duplex and shared by more than one task -
+    // gaitRunnerTask steps a gait every 5ms while espnowRxTask handles MOVE,
+    // JUMP and syncRead - so every transaction below takes this lock. Public
+    // so a caller that must not stall (the gait tick) can try for it and skip
+    // its turn rather than block behind a multi-second jump().
+    //
+    // Recursive: the composite operations are built out of the simple ones
+    // (moveToIdle -> bulkWrite, jump -> setProfile + bulkWrite + ...).
+    bool lockBus(TickType_t timeout = portMAX_DELAY);
+    void unlockBus();
+
   private:
+    SemaphoreHandle_t _busLock = nullptr;
     Dynamixel2Arduino& _dxl; // Member variable to store the object of Dynamixel2Arduino
 
     const uint8_t BROADCAST_ID = 254;

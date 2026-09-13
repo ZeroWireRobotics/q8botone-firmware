@@ -33,12 +33,6 @@ struct HeartbeatMessage{
   uint32_t timestamp;
 };
 
-// Dynamixel Variables
-bool recordData = false;
-size_t masterSize;
-size_t smallerSize = 4;
-uint16_t* rData = nullptr;
-
 // ESP-Now Comms
 bool incoming = false;
 PairingMessage pairingData;
