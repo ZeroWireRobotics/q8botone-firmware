@@ -33,6 +33,13 @@ class q8Dynamixel
     void toggleTorque(bool flag);
     void resetTorqueState(bool torqueOn = false);  // Reset internal torque flag without changing hardware state
     bool isTorqueOn() const;  // Current internal torque flag (not a hardware read)
+    // TORQUE_SET's mode byte: 0=off, 1=on (full stiffness), 2=damping - still
+    // torqued, but at DAMPING_GAIN instead of the usual 400, so a hand can
+    // push a joint into a new pose against soft resistance instead of either
+    // fighting full stiffness or getting no resistance at all (torque off).
+    // Any value other than 0/2 is treated as "on", so a malformed byte can't
+    // strand the robot in whatever mode it was already in.
+    void setJointMode(uint8_t mode);
     void setOpMode();
     void setProfile(uint16_t dur);
     void setGain(uint16_t p_gain);
@@ -102,7 +109,14 @@ class q8Dynamixel
     uint16_t _profile = 0;
     uint16_t _prevProfile;
     bool _torqueFlag = false;
-    bool _prevTorqueFlag = false;
+    // Last TORQUE_SET payload actually acted on (0/1/2) - dedupes repeated
+    // sends the same way _prevProfile does, so re-sending the current mode
+    // doesn't re-run enableTorque()/setGain() on every packet.
+    uint8_t _prevJointMode = 0;
+    // Untested starting point - the right value for "resists a push but
+    // doesn't fight hand-posing" depends on gearing/friction/leg mass and
+    // needs tuning on the actual robot. Lower = less resistance.
+    static const uint16_t DAMPING_GAIN = 30;
     bool _jumpEnabled = true;
     RGBManager* _rgb = nullptr;
     GaitRunner* _gaitRunner = nullptr;

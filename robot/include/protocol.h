@@ -20,7 +20,7 @@ static const size_t FRAME_OVERHEAD = 1 + FRAME_HEADER_LEN + FRAME_CRC_LEN;  // s
 
 enum class CmdType : uint8_t {          // host -> robot
   MOVE            = 0x01,
-  TORQUE_SET      = 0x02,
+  TORQUE_SET      = 0x02,  // {mode: uint8} 0=off, 1=on (full stiffness), 2=damping (see q8Dynamixel::setJointMode)
   BATTERY_REQUEST = 0x03,
   RECORD_SEND     = 0x04,  // retired - recording removed; id kept reserved
   JUMP            = 0x05,

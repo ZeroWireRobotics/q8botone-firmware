@@ -172,6 +172,20 @@ void q8Dynamixel::toggleTorque(bool flag){
   }
 }
 
+void q8Dynamixel::setJointMode(uint8_t mode){
+  // _torqueFlag tracks "is a host/teleop session actively holding the
+  // joints", which is true for damping too - only actual torque-off counts
+  // as idle for the standalone backup-demo trigger (see main.cpp).
+  BusGuard guard(*this);
+  _torqueFlag = (mode != 0);
+  if (mode == 0) {
+    disableTorque();
+    return;
+  }
+  enableTorque();
+  setGain(mode == 2 ? DAMPING_GAIN : 400);
+}
+
 void q8Dynamixel::resetTorqueState(bool torqueOn){
   // Reset the internal torque flag to match the given hardware state
   // Used after connection loss when torque was already disabled
@@ -487,11 +501,12 @@ uint8_t q8Dynamixel::parseFrame(const uint8_t* buf, size_t bufCapacity) {
 
     case CmdType::TORQUE_SET: {
       if (payloadLen < 1) return 0;
-      _torqueFlag = (payload[0] == 1);
-      if (_torqueFlag != _prevTorqueFlag) {
-        Serial.println(_torqueFlag ? "[ROBOT] Torque on" : "[ROBOT] Torque off");
-        toggleTorque(_torqueFlag);
-        _prevTorqueFlag = _torqueFlag;
+      uint8_t mode = payload[0];  // 0=off, 1=on, 2=damping
+      if (mode != _prevJointMode) {
+        const char* label = (mode == 2) ? "damping" : (mode == 1 ? "on" : "off");
+        Serial.printf("[ROBOT] Torque %s\n", label);
+        setJointMode(mode);
+        _prevJointMode = mode;
       }
       return 0;
     }
