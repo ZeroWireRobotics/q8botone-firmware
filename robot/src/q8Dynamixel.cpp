@@ -97,8 +97,47 @@ void q8Dynamixel::begin(){
   }
   _sr_infos.is_info_changed = true;
 
+  // Second sync-read set: temperature only (see readTemperature).
+  _tr_infos.packet.buf_capacity = _user_pkt_buf_cap;
+  _tr_infos.packet.p_buf = _tr_pkt_buf;
+  _tr_infos.packet.is_completed = false;
+  _tr_infos.addr = TR_START_ADDR;
+  _tr_infos.addr_length = TR_ADDR_LEN;
+  _tr_infos.p_xels = _info_xels_tr;
+  _tr_infos.xel_count = 0;
+
+  for (int i = 0; i < _idCount; i++){
+    _info_xels_tr[i].id = _DXL[i];
+    _info_xels_tr[i].p_recv_buf = (uint8_t*)&_tr_data[i];
+    _tr_infos.xel_count++;
+  }
+  _tr_infos.is_info_changed = true;
+
   setProfile(1000);
   expandArrays();
+}
+
+bool q8Dynamixel::readJointState(TelemetryPayload& out){
+  BusGuard guard(*this);
+
+  if (_dxl.fastSyncRead(&_sr_infos) != _idCount) return false;
+
+  for (uint8_t i = 0; i < _idCount; i++){
+    out.position[i] = _sr_data[i].present_position;
+    out.current[i]  = _sr_data[i].present_current;
+  }
+  return true;
+}
+
+bool q8Dynamixel::readTemperature(int8_t out[8]){
+  BusGuard guard(*this);
+
+  if (_dxl.fastSyncRead(&_tr_infos) != _idCount) return false;
+
+  for (uint8_t i = 0; i < _idCount; i++){
+    out[i] = (int8_t)_tr_data[i].present_temperature;
+  }
+  return true;
 }
 
 bool q8Dynamixel::checkComms(uint8_t ID){
@@ -211,33 +250,6 @@ void q8Dynamixel::moveToIdle(uint16_t dur){
   setProfile(dur);
   delay(100);
   bulkWrite(_idleArray);
-}
-
-uint16_t* q8Dynamixel::syncRead(){
-  BusGuard guard(*this);
-  // Read relevant registers from all joints into a single array
-  int recv_cnt;
-  size_t offset = 0;
-  uint16_t* byteArray = new uint16_t[_idCount * 2];
-
-  recv_cnt = _dxl.fastSyncRead(&_sr_infos);
-  if(recv_cnt = _idCount){
-    for (size_t i = 0; i < _idCount; i++){
-      // cast to uint16_t since values never exceed 65535 in robot configuration
-      byteArray[i*2] = static_cast<uint16_t>(_sr_data[i].present_current + 10000);
-      byteArray[i*2+1] = static_cast<uint16_t>(_sr_data[i].present_position);
-    }
-  } else {
-    // Fill ByteArray with zeros
-    for (size_t i = 0; i < _idCount*2; ++i){
-      byteArray[i] = 0;
-    }
-  }
-
-  // for (size_t i = 0; i < 4; ++i){
-  //   Serial.print(byteArray[i]); Serial.print(" ");
-  // } Serial.println();
-  return byteArray;
 }
 
 void q8Dynamixel::setJumpEnabled(bool enabled) {
@@ -486,6 +498,12 @@ uint8_t q8Dynamixel::parseFrame(const uint8_t* buf, size_t bufCapacity) {
 
     case CmdType::BATTERY_REQUEST:
       return 1;
+
+    case CmdType::TELEMETRY_REQUEST:
+      // Answered by gaitRunnerTask rather than here: the servo bus has one
+      // owner, and sampling there puts the read right after the gait write
+      // where it uses slack instead of delaying a frame.
+      return 4;
 
     case CmdType::RECORD_SEND:
       // Retired. Left as a no-op rather than removed so an older host that

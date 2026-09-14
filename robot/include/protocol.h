@@ -29,6 +29,7 @@ enum class CmdType : uint8_t {          // host -> robot
   GREET           = 0x08,  // no payload - scripted greeting sequence, runs entirely on the robot
   HOST_CONNECTED  = 0x09,  // no payload - controller-local only, never forwarded to the robot
   LED_BRIGHTNESS  = 0x0A,  // {brightness: uint8, 0-255} - sets & persists the robot's RGB LED brightness
+  TELEMETRY_REQUEST = 0x0B,  // no payload - ask for one joint snapshot; answered with TELEMETRY_REPLY
 };
 
 // Canonical direction ordering for GAIT_RUN's direction_id (0-11). Must
@@ -38,9 +39,22 @@ enum class CmdType : uint8_t {          // host -> robot
 // bl_0.75=8, bl_0.5=9, br_0.75=10, br_0.5=11
 
 enum class ReplyType : uint8_t {        // robot -> host
-  BATTERY_REPLY     = 0x81,
+  BATTERY_REPLY     = 0x81,  // {percent: uint8, millivolts: uint16}
   RECORD_DATA_REPLY = 0x82,  // retired alongside RECORD_SEND; kept reserved
+  TELEMETRY_REPLY   = 0x83,  // one joint snapshot - see TelemetryPayload below
 };
+
+// Payload of TELEMETRY_REPLY: one snapshot of all 8 joints, 56 bytes.
+// Position and current are read fresh; temperature is whatever the robot
+// last sampled (see TELEMETRY_TEMP_PERIOD_MS) since it lives outside the
+// contiguous 126-135 block and changes over seconds, not milliseconds.
+// Layout must match python-tools/q8bot/protocol.py's TELEMETRY_STRUCT.
+struct __attribute__((packed)) TelemetryPayload {
+  int32_t position[8];     // raw Dynamixel ticks
+  int16_t current[8];      // mA, signed; reads ~0 with torque off
+  int8_t  temperature[8];  // degrees C
+};
+static_assert(sizeof(TelemetryPayload) == 56, "TelemetryPayload must stay 56 bytes");
 
 inline uint16_t crc16Arc(const uint8_t* data, size_t len, uint16_t crc = 0x0000){
   for (size_t i = 0; i < len; i++){

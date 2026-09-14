@@ -63,6 +63,22 @@ volatile bool pairingAcceptingRequests = true;
 // right in front of the robot rather than in a handheld controller.
 const uint8_t DEFAULT_LED_BRIGHTNESS = 128;
 
+// Joint telemetry (see protocol.h's TelemetryPayload). espnowRxTask only
+// raises the flag; gaitRunnerTask does the reading, so the servo bus keeps a
+// single owner and the read lands right after the gait write where it uses
+// slack rather than delaying a frame.
+volatile bool telemetryRequested = false;
+uint32_t lastTelemetryRequestMs = 0;
+
+// Temperature is cached rather than read per sample: it sits outside the
+// contiguous 126-135 block the main read covers, and moves over seconds. The
+// robot refreshes it on this period and every reply carries the last value,
+// so the host can ask as fast as it likes without touching a servo for it.
+const uint32_t TELEMETRY_TEMP_PERIOD_MS = 1000;
+// Only kept fresh while a host is actually asking - standalone mode should
+// spend exactly zero bus time on telemetry.
+const uint32_t TELEMETRY_IDLE_TIMEOUT_MS = 3000;
+
 
 // ============================================================================
 // Helper Functions
@@ -263,11 +279,25 @@ void espnowRxTask(void* parameter) {
         } else {
           // Controller requests battery level or data
           switch (result) {
+            case 4: {
+              // Joint telemetry - sampled and answered by gaitRunnerTask.
+              telemetryRequested = true;
+              lastTelemetryRequestMs = millis();
+              break;
+            }
+
             case 1: {
               // Send battery level
               queuePrint(MSG_DEBUG, "[DATA] Send battery level\n");
-              uint8_t percent = (uint8_t)batteryGetPercent();
-              buildFrame((uint8_t)ReplyType::BATTERY_REPLY, &percent, 1, (uint8_t*)myMsg.data);
+              // Percent is derived from this same VBAT reading (see
+              // battery.cpp's lookup table), so both halves of the reply come
+              // from one ADC sample rather than two that could disagree.
+              uint8_t payload[3];
+              payload[0] = (uint8_t)batteryGetPercent();
+              uint16_t millivolts = (uint16_t)lroundf(batteryGetADC() * 1000.0f);
+              memcpy(payload + 1, &millivolts, sizeof(millivolts));
+              buildFrame((uint8_t)ReplyType::BATTERY_REPLY, payload, sizeof(payload),
+                         (uint8_t*)myMsg.data);
               esp_now_send(clientMac, (uint8_t*)&myMsg, sizeof(myMsg));
               break;
             }
@@ -651,9 +681,40 @@ void gaitRunnerTask(void* parameter) {
 
   const TickType_t period = pdMS_TO_TICKS(5);
 
+  // Its own reply buffer: espnowRxTask owns myMsg, and both tasks can be
+  // building a frame at the same time.
+  static DataMessage telemetryMsg;
+  static TelemetryPayload telemetry = {};
+  static int8_t cachedTemperature[8] = {0};
+  static uint32_t lastTempSampleMs = 0;
+
   while (true) {
     if (gaitRunner.isActive()) {
       gaitRunner.tick();
+    }
+
+    // Telemetry goes after the gait write, deliberately: the servos already
+    // have their new goal position by this point, so the read only consumes
+    // slack that would otherwise sit idle.
+    uint32_t nowMs = millis();
+    bool hostWantsTelemetry = (nowMs - lastTelemetryRequestMs) < TELEMETRY_IDLE_TIMEOUT_MS;
+
+    if (hostWantsTelemetry && (nowMs - lastTempSampleMs) >= TELEMETRY_TEMP_PERIOD_MS) {
+      lastTempSampleMs = nowMs;
+      q8.readTemperature(cachedTemperature);
+    }
+
+    if (telemetryRequested) {
+      telemetryRequested = false;
+      if (paired && q8.readJointState(telemetry)) {
+        memcpy(telemetry.temperature, cachedTemperature, sizeof(cachedTemperature));
+        telemetryMsg.msgType = DATA;
+        telemetryMsg.id = 0;
+        buildFrame((uint8_t)ReplyType::TELEMETRY_REPLY,
+                   (const uint8_t*)&telemetry, sizeof(telemetry),
+                   (uint8_t*)telemetryMsg.data);
+        esp_now_send(clientMac, (uint8_t*)&telemetryMsg, sizeof(telemetryMsg));
+      }
     }
 
     // If something long ran between ticks - a jump, a greet, or simply this

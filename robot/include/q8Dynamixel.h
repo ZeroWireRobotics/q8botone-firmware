@@ -40,7 +40,20 @@ class q8Dynamixel
     void bulkWrite(int32_t values[8]);
     void bulkWriteDeg(const float degs[8]);  // Converts to raw ticks via _deg2Dxl, then bulkWrite
     void moveToIdle(uint16_t dur = 500);  // Move all legs to the precomputed idle/neutral pose
-    uint16_t* syncRead();
+    // Reads present position and current for all 8 joints into out (see
+    // protocol.h's TelemetryPayload). Leaves out.temperature alone - that is
+    // sampled separately by readTemperature(), since it sits outside the
+    // contiguous 126-135 block and changes far too slowly to be worth the
+    // extra bus time on every sample.
+    //
+    // Works with torque off; current simply reads near zero, because none is
+    // flowing. Returns false if the servos didn't all answer.
+    bool readJointState(struct TelemetryPayload& out);
+
+    // Samples present temperature for all 8 joints. Its own transaction
+    // rather than a wider readJointState(), which would cost ~0.9ms more on
+    // every sample for a value that moves over seconds.
+    bool readTemperature(int8_t out[8]);
     void jump();
     void greet();      // Scripted greeting sequence (no host required)
     void trotDemo();   // A few trot steps forward, then a few steps backward (no host required)
@@ -49,13 +62,15 @@ class q8Dynamixel
     // Parses/validates a framed command (see protocol.h) already sitting in
     // buf (bufCapacity is a safety bound, not necessarily the real frame
     // length - the frame is self-delimiting via its own LENGTH byte).
-    // Returns 0 (no-op/handled) or 1 (battery requested). 2 and 3 used to
-    // mean "move + record" and "send recorded data"; recording is gone.
+    // Returns 0 (no-op/handled), 1 (battery requested) or 4 (joint
+    // telemetry requested). 2 and 3 used to mean "move + record" and "send
+    // recorded data"; recording is gone.
     uint8_t parseFrame(const uint8_t* buf, size_t bufCapacity);
 
     // The servo bus is half duplex and shared by more than one task -
-    // gaitRunnerTask steps a gait every 5ms while espnowRxTask handles MOVE,
-    // JUMP and syncRead - so every transaction below takes this lock. Public
+    // gaitRunnerTask steps a gait and samples telemetry every 5ms while
+    // espnowRxTask handles MOVE and JUMP - so every transaction below takes
+    // this lock. Public
     // so a caller that must not stall (the gait tick) can try for it and skip
     // its turn rather than block behind a multi-second jump().
     //
@@ -134,6 +149,19 @@ class q8Dynamixel
     sr_data_t _sr_data[_idCount];
     DYNAMIXEL::InfoSyncReadInst_t _sr_infos;
     DYNAMIXEL::XELInfoSyncRead_t _info_xels_sr[_idCount];
+
+    // Second sync-read set, for the temperature-only transaction. Separate
+    // from _sr_* so the two reads don't have to reconfigure each other's
+    // address/length every time they alternate.
+    const uint16_t TR_START_ADDR = 146;  // Present Temperature
+    const uint16_t TR_ADDR_LEN = 1;
+    typedef struct tr_data{
+      uint8_t present_temperature;
+    } __attribute__((packed)) tr_data_t;
+    tr_data_t _tr_data[_idCount];
+    uint8_t _tr_pkt_buf[_user_pkt_buf_cap];
+    DYNAMIXEL::InfoSyncReadInst_t _tr_infos;
+    DYNAMIXEL::XELInfoSyncRead_t _info_xels_tr[_idCount];
     sw_data_t _sw_data[_idCount];
     DYNAMIXEL::InfoSyncWriteInst_t _sw_infos;
     DYNAMIXEL::XELInfoSyncWrite_t _info_xels_sw[_idCount];

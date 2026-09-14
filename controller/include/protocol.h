@@ -29,11 +29,13 @@ enum class CmdType : uint8_t {          // host -> robot
   GREET           = 0x08,  // no payload - scripted greeting sequence, runs entirely on the robot
   HOST_CONNECTED  = 0x09,  // no payload - controller-local only, never forwarded to the robot
   LED_BRIGHTNESS  = 0x0A,  // {brightness: uint8, 0-255} - sets & persists the robot's RGB LED brightness
+  TELEMETRY_REQUEST = 0x0B,  // no payload - ask for one joint snapshot; answered with TELEMETRY_REPLY
 };
 
 enum class ReplyType : uint8_t {        // robot -> host
   BATTERY_REPLY     = 0x81,
   RECORD_DATA_REPLY = 0x82,  // retired alongside RECORD_SEND; kept reserved
+  TELEMETRY_REPLY   = 0x83,  // relayed verbatim; see the robot's protocol.h
 };
 
 inline uint16_t crc16Arc(const uint8_t* data, size_t len, uint16_t crc = 0x0000){
