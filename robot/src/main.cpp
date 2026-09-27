@@ -79,6 +79,13 @@ const uint32_t TELEMETRY_TEMP_PERIOD_MS = 1000;
 // spend exactly zero bus time on telemetry.
 const uint32_t TELEMETRY_IDLE_TIMEOUT_MS = 3000;
 
+// Which firmware this is. The desktop app's flasher reads it two ways: sent
+// back as a line when the host writes 'i' over USB serial (what the plugged-in
+// device *is*), and found as a literal inside the .bin (what a file *would
+// make* it) - so it can refuse to put robot firmware on the controller or
+// vice versa. Must match python-tools/q8bot/firmware_flasher.py.
+static const char FIRMWARE_ID[] = "Q8BOT_FW|robot";
+
 
 // ============================================================================
 // Helper Functions
@@ -663,6 +670,8 @@ void serialOutputTask(void* parameter) {
       } else if (c == 'd') {
         debugMode = !debugMode;
         queuePrint(MSG_INFO, "Debug mode: %s\n", debugMode ? "ON" : "OFF");
+      } else if (c == 'i') {
+        queuePrint(MSG_INFO, "%s\n", FIRMWARE_ID);  // see FIRMWARE_ID
       }
     }
 

@@ -73,6 +73,13 @@ EventGroupHandle_t eventGroup = NULL;
 // could corrupt a reply frame's boundaries as the host sees them.
 SemaphoreHandle_t serialTxMutex = NULL;
 
+// Which firmware this is. The desktop app's flasher reads it two ways: sent
+// back as a line when the host writes 'i' over serial (what the plugged-in
+// device *is*), and found as a literal inside the .bin (what a file *would
+// make* it) - so it can refuse to put robot firmware on the controller or
+// vice versa. Must match python-tools/q8bot/firmware_flasher.py.
+static const char FIRMWARE_ID[] = "Q8BOT_FW|controller";
+
 
 // ============================================================================
 // Helper Functions
@@ -213,6 +220,10 @@ void commandForwardingTask(void *param) {
         Serial.read();
         queuePrint(MSG_DEBUG, "[PAIRING] Force pairing mode requested\n");
         unpair();
+      }
+      else if (peeked == 'i') {
+        Serial.read();
+        queuePrint(MSG_INFO, "%s\n", FIRMWARE_ID);  // see FIRMWARE_ID
       }
       else if (peeked == FRAME_START) {
         Serial.read();  // consume START
