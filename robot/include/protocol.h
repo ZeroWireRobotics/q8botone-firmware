@@ -13,6 +13,12 @@
 
 #include <Arduino.h>
 
+// Wire protocol version, shared by host, controller and robot. Bump it for
+// any change the other side has to know about: a new or changed command or
+// reply, a payload layout, gait/direction IDs. Must equal protocol.py's
+// PROTOCOL_VERSION. Not yet exchanged or checked on connect.
+static const uint8_t PROTOCOL_VERSION = 1;
+
 static const uint8_t FRAME_START = 0xAA;
 static const size_t FRAME_HEADER_LEN = 2;   // msg_type, length
 static const size_t FRAME_CRC_LEN = 2;

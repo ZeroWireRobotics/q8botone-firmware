@@ -1,0 +1,31 @@
+#!/bin/sh
+# Works out this commit's version trailers from what's staged; commit-msg
+# adds them once the message is written. Enabled per clone with:
+#     git config core.hooksPath .githooks
+#
+#     Firmware-Version: unreleased, after v0.1.0   (the release this builds on)
+#     Protocol-Version: 1                          (PROTOCOL_VERSION in both protocol.h copies)
+#
+# The exact build version (`git describe`, e.g. 0.1.0-3-gabc1234) contains
+# this commit's own hash, which doesn't exist yet - run `git describe <sha>`
+# for it. Merges and squashes get no trailers.
+
+out="$(git rev-parse --git-dir)/q8-version-trailers"
+rm -f "$out"
+case "$2" in merge|squash) exit 0 ;; esac
+
+tag=$(git describe --tags --abbrev=0 --match 'v[0-9]*' 2>/dev/null)
+firmware=${tag:+"unreleased, after $tag"}
+
+protocol_of() {
+    git show ":$1" 2>/dev/null | sed -n 's/.*PROTOCOL_VERSION *= *\([0-9][0-9]*\).*/\1/p' | head -n 1
+}
+robot=$(protocol_of robot/include/protocol.h)
+controller=$(protocol_of controller/include/protocol.h)
+if [ "$robot" = "$controller" ]; then
+    protocol=${robot:-none}
+else
+    protocol="MISMATCH robot=${robot:-none} controller=${controller:-none}"
+fi
+
+printf 'Firmware-Version: %s\nProtocol-Version: %s\n' "${firmware:-untagged}" "$protocol" > "$out"
