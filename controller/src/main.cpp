@@ -77,8 +77,13 @@ SemaphoreHandle_t serialTxMutex = NULL;
 // back as a line when the host writes 'i' over serial (what the plugged-in
 // device *is*), and found as a literal inside the .bin (what a file *would
 // make* it) - so it can refuse to put robot firmware on the controller or
-// vice versa. Must match q8botone-python/q8bot/firmware_flasher.py.
-static const char FIRMWARE_ID[] = "Q8BOT_FW|controller";
+// vice versa. The version after the second '|' is stamped in at build time
+// from `git describe` (see scripts/fw_version.py). Must match
+// q8botone-python/q8bot/firmware_flasher.py.
+#ifndef Q8BOT_FW_VERSION
+#define Q8BOT_FW_VERSION "unknown"
+#endif
+static const char FIRMWARE_ID[] = "Q8BOT_FW|controller|" Q8BOT_FW_VERSION;
 
 
 // ============================================================================
