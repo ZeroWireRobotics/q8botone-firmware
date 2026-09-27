@@ -44,7 +44,7 @@ EventGroupHandle_t eventGroup = NULL;
 volatile RobotState robotState = STATE_UNPAIRED;
 
 // Physical pairing button (IO9, active-low, new PCB revision) - long-press
-// forces a re-pair, mirroring q8bot_controller's button. Unlike a fresh/
+// forces a re-pair, mirroring the controller firmware's button. Unlike a fresh/
 // never-paired boot (which accepts a PAIRING request forever - see
 // pairingAcceptingRequests's default below), a manual re-pair is bounded to
 // PAIRING_TIMEOUT_MS: if nothing pairs within the window, the robot stops
@@ -83,7 +83,7 @@ const uint32_t TELEMETRY_IDLE_TIMEOUT_MS = 3000;
 // back as a line when the host writes 'i' over USB serial (what the plugged-in
 // device *is*), and found as a literal inside the .bin (what a file *would
 // make* it) - so it can refuse to put robot firmware on the controller or
-// vice versa. Must match python-tools/q8bot/firmware_flasher.py.
+// vice versa. Must match q8botone-python/q8bot/firmware_flasher.py.
 static const char FIRMWARE_ID[] = "Q8BOT_FW|robot";
 
 

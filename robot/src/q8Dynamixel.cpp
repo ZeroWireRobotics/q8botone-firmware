@@ -360,7 +360,7 @@ void q8Dynamixel::_playFrames(const float frames[][8], uint8_t frameCount, uint8
 void q8Dynamixel::trotDemo(){
   BusGuard guard(*this);
   // Fast forward, then fast backward, using TROT_FAST's 'f' and 'b'
-  // directions (ported from python-tools/q8bot/gait_generator.py's
+  // directions (ported from q8botone-python/q8bot/gait_generator.py's
   // generate_trot_trajectories(), via gait_manager.py's TROT_FAST params).
   static const uint8_t FRAME_COUNT = 36;
   static const uint8_t REPS = 5;  // steps per direction

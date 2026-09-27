@@ -1,6 +1,6 @@
 /*
   protocol.h - Binary framed wire protocol shared with
-  python-tools/q8bot/protocol.py and the other firmware project's copy of
+  q8botone-python/q8bot/protocol.py and the other firmware project's copy of
   this file. KEEP THESE THREE IN SYNC.
 
   [START=0xAA][MSG_TYPE][LENGTH][PAYLOAD...][CRC_LO][CRC_HI]
@@ -33,7 +33,7 @@ enum class CmdType : uint8_t {          // host -> robot
 };
 
 // Canonical direction ordering for GAIT_RUN's direction_id (0-11). Must
-// match python-tools/q8bot/protocol.py's DIRECTION_ORDER and the order
+// match q8botone-python/q8bot/protocol.py's DIRECTION_ORDER and the order
 // gaitTables.h's *_DIRECTIONS arrays are built in (export_gait_tables.py):
 // f=0, b=1, l=2, r=3, fl_0.75=4, fl_0.5=5, fr_0.75=6, fr_0.5=7,
 // bl_0.75=8, bl_0.5=9, br_0.75=10, br_0.5=11
@@ -48,7 +48,7 @@ enum class ReplyType : uint8_t {        // robot -> host
 // Position and current are read fresh; temperature is whatever the robot
 // last sampled (see TELEMETRY_TEMP_PERIOD_MS) since it lives outside the
 // contiguous 126-135 block and changes over seconds, not milliseconds.
-// Layout must match python-tools/q8bot/protocol.py's TELEMETRY_STRUCT.
+// Layout must match q8botone-python/q8bot/protocol.py's TELEMETRY_STRUCT.
 struct __attribute__((packed)) TelemetryPayload {
   int32_t position[8];     // raw Dynamixel ticks
   int16_t current[8];      // mA, signed; reads ~0 with torque off

@@ -35,7 +35,7 @@ bool manualPairingEntry = false;
 // Default status-LED brightness (0-255) - full brightness, since this LED
 // is the controller's only pairing/connection indicator and there's no
 // upstream command to change it (unlike the robot's own LED, which defaults
-// dimmer - see q8bot_robot's DEFAULT_LED_BRIGHTNESS).
+// dimmer - see the robot firmware's DEFAULT_LED_BRIGHTNESS).
 const uint8_t DEFAULT_LED_BRIGHTNESS = 255;
 
 // Physical pairing button (IO9, active-low) - separate trigger from the
@@ -77,7 +77,7 @@ SemaphoreHandle_t serialTxMutex = NULL;
 // back as a line when the host writes 'i' over serial (what the plugged-in
 // device *is*), and found as a literal inside the .bin (what a file *would
 // make* it) - so it can refuse to put robot firmware on the controller or
-// vice versa. Must match python-tools/q8bot/firmware_flasher.py.
+// vice versa. Must match q8botone-python/q8bot/firmware_flasher.py.
 static const char FIRMWARE_ID[] = "Q8BOT_FW|controller";
 
 
@@ -501,7 +501,7 @@ void pairingTask(void *param) {
 // ============================================================================
 // FreeRTOS Task: RGB Status + Pairing Button (Priority 0 - lowest). Always
 // created (unlike independentControlTask, which needs a gamepad) since the
-// button and LED are fixed hardware on every unit. Mirrors q8bot_robot's
+// button and LED are fixed hardware on every unit. Mirrors the robot firmware's
 // RGB status language (main.cpp's STATE_UNPAIRED/STATE_PAIRED handling) so
 // both ends of the link read the same way: rainbow while searching for a
 // peer, solid blue once paired with a live heartbeat, blinking blue if the
@@ -574,7 +574,7 @@ void rgbStatusTask(void* parameter) {
       }
     } else if (pairingBroadcasting) {
       // Rainbow cycle, ~13s per full revolution at this tick rate - matches
-      // q8bot_robot's STATE_UNPAIRED pace.
+      // the robot firmware's STATE_UNPAIRED pace.
       rgb.setHue(hue);
       hue += 256;
     } else {

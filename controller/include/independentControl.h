@@ -1,6 +1,6 @@
 /*
   independentControl.h - Pure decision logic for standalone (no-host)
-  gamepad control, ported directly from python-tools/q8bot's own control
+  gamepad control, ported directly from q8botone-python's own control
   logic so independent mode behaves the same way operate.py would for the
   same stick position:
     - resolveDirection()  <- control_config.py's get_joystick_direction(analog_mode=True)
@@ -22,7 +22,7 @@
 #include <Arduino.h>
 
 // Canonical direction ordering - MUST match protocol.h's DIRECTION_ORDER
-// comment and python-tools/q8bot/protocol.py's DIRECTION_ORDER (also the
+// comment and q8botone-python/q8bot/protocol.py's DIRECTION_ORDER (also the
 // order gaitTables.h's *_DIRECTIONS arrays are built in).
 enum class Direction : uint8_t {
   F = 0, B = 1, L = 2, R = 3,

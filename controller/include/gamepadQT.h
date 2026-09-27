@@ -4,7 +4,7 @@
   default I2C pins (Wire.begin() with no explicit SDA/SCL args).
 
   Adds software debounce on top of the raw seesaw button reads, and
-  normalizes/deadzones the joystick to match python-tools/q8bot's
+  normalizes/deadzones the joystick to match q8botone-python's
   convention (control_config.py): X negative=left/positive=right,
   Y negative=forward(up)/positive=backward(down). Pin numbers below are on
   the seesaw's own GPIO space (Adafruit's Gamepad QT pinout reference) and

@@ -1,6 +1,6 @@
 /*
   protocol.h - Binary framed wire protocol shared with
-  python-tools/q8bot/protocol.py and the other firmware project's copy of
+  q8botone-python/q8bot/protocol.py and the other firmware project's copy of
   this file. KEEP THESE THREE IN SYNC.
 
   [START=0xAA][MSG_TYPE][LENGTH][PAYLOAD...][CRC_LO][CRC_HI]
