@@ -10,19 +10,11 @@
 #include "systemParams.h"
 #include "pinMapping.h"
 #include "macStorage.h"
-#include "powerManager.h"
+#include "powerRail.h"
 #include "RGBManager.h"
 #include "battery.h"
 #include "protocol.h"
 #include "gaitRunner.h"
-
-// ============================================================================
-// TEMPORARY BENCH-TEST OVERRIDE - remove before normal/battery use.
-// Skips the button-hold-to-boot latch and the shutdown monitor task (so the
-// robot boots immediately and never powers itself off), and disables the
-// double-tap backup-demo trigger.
-// ============================================================================
-#define BENCH_DISABLE_POWER_MGMT 1
 
 // Initialize global objects
 esp_now_peer_info_t peerInfo;
@@ -31,7 +23,8 @@ Dynamixel2Arduino       q8dxl(ser, DXL_DIR_PIN);
 q8Dynamixel             q8(q8dxl);
 bool started = false;  // Track robot start state
 macStorage storage;
-PowerManager            power(LATCH_PIN, SENSE_PIN, LED_PIN);
+PowerRail               rail5V(BUCK_5V_EN_PIN, BUCK_5V_ON);   // peripherals, e.g. the RGB LED
+PowerRail               rail6V(BUCK_6V_EN_PIN, BUCK_6V_ON);   // servos
 RGBManager              rgb(RGB_PIN);
 GaitRunner              gaitRunner(q8);
 
@@ -111,6 +104,15 @@ bool addPeer(const uint8_t* mac) {
   peer.channel = chan;
   peer.encrypt = false;
   return esp_now_add_peer(&peer) == ESP_OK;
+}
+
+// Serial '5' / '6' (see serialOutputTask): flip a buck by hand, for hardware
+// checks. Nothing else is told - switching the 6V rail off under torque
+// drops the robot, and its servos come back up with torque off and their
+// RAM settings reset.
+void toggleRail(PowerRail& rail, const char* name) {
+  rail.set(!rail.isOn());
+  queuePrint(MSG_INFO, "[POWER] %s buck %s\n", name, rail.isOn() ? "ON" : "OFF");
 }
 
 void unpair() {
@@ -346,11 +348,6 @@ void robotStateTask(void* parameter) {
   // Give other tasks time to start (especially serialOutputTask)
   vTaskDelay(pdMS_TO_TICKS(100));
 
-  // Backup demo cycle: each double-tap (while torque is off) runs exactly
-  // one of these, advancing to the next for the following double-tap.
-  const uint8_t BACKUP_DEMO_COUNT = 3;
-  uint8_t backupDemoIndex = 0;
-
   while (true) {
     // On first run, check for saved MAC address
     if (firstRun) {
@@ -405,41 +402,6 @@ void robotStateTask(void* parameter) {
         enterPairingModeManually();
       }
     }
-
-#if !BENCH_DISABLE_POWER_MGMT
-    // Backup demo trigger: double-tap the power button while torque is off
-    // (i.e. no host is actively driving the robot) to run exactly one demo
-    // move, cycling to the next on each subsequent double-tap. Ignored
-    // entirely if a host is connected, so it can never fight a live
-    // teleop session.
-    if (power.consumeDoubleTap() && !q8.isTorqueOn()) {
-      q8.toggleTorque(true);
-      q8.resetTorqueState(true);
-      q8.moveToIdle(500);
-      delay(600);       // let the move-to-neutral finish before the demo move
-
-      switch (backupDemoIndex) {
-        case 0:
-          queuePrint(MSG_INFO, "[BACKUP DEMO] Double-tap detected, torque off - trotting\n");
-          q8.trotDemo();
-          break;
-        case 1:
-          queuePrint(MSG_INFO, "[BACKUP DEMO] Double-tap detected, torque off - jumping\n");
-          q8.jump();
-          break;
-        case 2:
-          queuePrint(MSG_INFO, "[BACKUP DEMO] Double-tap detected, torque off - greeting\n");
-          q8.greet();
-          break;
-      }
-      backupDemoIndex = (backupDemoIndex + 1) % BACKUP_DEMO_COUNT;
-
-      q8.moveToIdle(500);
-      delay(600);
-      q8.toggleTorque(false);
-      q8.resetTorqueState(false);
-    }
-#endif  // !BENCH_DISABLE_POWER_MGMT
 
     // Battery check: every 30s, but only when commands have been quiet for 5s
     // (avoids reading under motor load or during a jump sequence)
@@ -677,6 +639,10 @@ void serialOutputTask(void* parameter) {
         queuePrint(MSG_INFO, "Debug mode: %s\n", debugMode ? "ON" : "OFF");
       } else if (c == 'i') {
         queuePrint(MSG_INFO, "%s\n", FIRMWARE_ID);  // see FIRMWARE_ID
+      } else if (c == '5') {
+        toggleRail(rail5V, "5V");   // see toggleRail
+      } else if (c == '6') {
+        toggleRail(rail6V, "6V");
       }
     }
 
@@ -745,17 +711,26 @@ void gaitRunnerTask(void* parameter) {
   }
 }
 
+// How long the 5V rail gets to come up (buck soft-start, then the RGB LED's
+// own power-on) before the LED is sent a color.
+const uint32_t RAIL_5V_SETTLE_MS = 20;
+
 // FreeRTOS Task: Power Saving (Priority 1) - only created when the boot
-// battery check reads critical (<5%). WiFi/ESP-NOW/motors are never brought
-// up in this mode (see setup()), so this task is the only thing running:
-// just a slow "still alive, still critical" blink until the user physically
-// powers off. The eventual goal is MCU deep sleep with regulators disabled
-// instead of this loop - deliberately not attempted yet.
+// battery check reads critical (<5%). WiFi/ESP-NOW/servos are never brought
+// up in this mode and both bucks are off (see setup()), so this task is the
+// only thing running: a slow "still alive, still critical" red blink until
+// the user physically powers off. The 5V buck is switched on only for each
+// blink - the RGB LED is its load - so between blinks the ESP32 is the only
+// thing drawing current. Next step: deep sleep between blinks instead of
+// this task.
 void powerSavingTask(void* parameter) {
   while (true) {
+    rail5V.set(true);
+    vTaskDelay(pdMS_TO_TICKS(RAIL_5V_SETTLE_MS));
     rgb.setColor(255, 0, 0);
     vTaskDelay(pdMS_TO_TICKS(50));
     rgb.off();
+    rail5V.set(false);
     vTaskDelay(pdMS_TO_TICKS(9950));
   }
 }
@@ -766,21 +741,16 @@ void powerSavingTask(void* parameter) {
 void setup() {
   Serial.begin(115200);
   pinMode(LED_PIN, OUTPUT);
-  pinMode(BUTTON_PIN, INPUT_PULLUP);  // Pairing button - independent of the power latch above
+  pinMode(BUTTON_PIN, INPUT_PULLUP);  // Pairing button
 
-#if BENCH_DISABLE_POWER_MGMT
-  // Bench mode - skip the button-hold requirement and latch power on
-  // immediately.
-  pinMode(LATCH_PIN, OUTPUT);
-  digitalWrite(LATCH_PIN, HIGH);
-  Serial.println("[POWER] Bench mode - latch forced on, button hold skipped");
-#else
-  // Power latch — must run before anything else
-  while (!power.begin()) {
-    // Serial.println("[POWER] Button released early - hold for 3s to power on");
-  }
-  Serial.println("[POWER] Latched on");
-#endif
+  // Both bucks on before anything they power is touched - the RGB LED just
+  // below (5V), the servos from q8.begin() at the end (6V). The 6V rail is
+  // on from here, as it was when the board's own pull decided it, so the
+  // servos keep the same time to boot before q8.begin() pings them.
+  rail5V.begin(true);
+  rail6V.begin(true);
+  Serial.println("[POWER] 5V and 6V bucks on");
+  delay(RAIL_5V_SETTLE_MS);
   rgb.begin(storage.loadLedBrightness(DEFAULT_LED_BRIGHTNESS));
 
   // BQ25887 init - done here (before WiFi/FreeRTOS bring-up below) so the
@@ -816,13 +786,13 @@ void setup() {
   }
 
   if (powerSavingMode) {
-    // Skip WiFi/ESP-NOW/motor bring-up entirely - nothing productive can
+    // Skip WiFi/ESP-NOW/servo bring-up entirely - nothing productive can
     // happen safely this low, and staying off the radio saves what little
-    // charge is left. The power button's hold-to-shutoff monitor is the one
-    // thing still started, so the user can power off normally.
-#if !BENCH_DISABLE_POWER_MGMT
-    power.startMonitorTask();
-#endif
+    // charge is left. Both bucks go off; powerSavingTask() pulses the 5V
+    // one only to blink the LED.
+    rail6V.set(false);
+    rail5V.set(false);
+    Serial.println("[POWER] Critical battery - 5V and 6V bucks off");
     xTaskCreate(powerSavingTask, "PowerSaving", 2048, NULL, 1, NULL);
     return;
   }
@@ -938,11 +908,6 @@ void setup() {
     Serial.println("[RTOS] Initialization failed - halting system");
     while(1) { delay(1000); }  // Halt system indefinitely
   }
-
-#if !BENCH_DISABLE_POWER_MGMT
-  // Start power button monitor task (must be after all xTaskCreate calls)
-  power.startMonitorTask();
-#endif
 
   // Initialize Dynamixel object
   q8.begin();
