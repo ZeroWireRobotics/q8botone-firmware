@@ -17,7 +17,7 @@
 // any change the other side has to know about: a new or changed command or
 // reply, a payload layout, gait/direction IDs. Must equal protocol.py's
 // PROTOCOL_VERSION. Not yet exchanged or checked on connect.
-static const uint8_t PROTOCOL_VERSION = 1;
+static const uint8_t PROTOCOL_VERSION = 2;  // 2: SENSOR_REQUEST / SENSOR_REPLY
 
 static const uint8_t FRAME_START = 0xAA;
 static const size_t FRAME_HEADER_LEN = 2;   // msg_type, length
@@ -36,6 +36,7 @@ enum class CmdType : uint8_t {          // host -> robot
   HOST_CONNECTED  = 0x09,  // no payload - controller-local only, never forwarded to the robot
   LED_BRIGHTNESS  = 0x0A,  // {brightness: uint8, 0-255} - sets & persists the robot's RGB LED brightness
   TELEMETRY_REQUEST = 0x0B,  // no payload - ask for one joint snapshot; answered with TELEMETRY_REPLY
+  SENSOR_REQUEST  = 0x0C,  // no payload - sample the Qwiic sensors; answered with SENSOR_REPLY
 };
 
 // Canonical direction ordering for GAIT_RUN's direction_id (0-11). Must
@@ -48,7 +49,27 @@ enum class ReplyType : uint8_t {        // robot -> host
   BATTERY_REPLY     = 0x81,  // {percent: uint8, millivolts: uint16}
   RECORD_DATA_REPLY = 0x82,  // retired alongside RECORD_SEND; kept reserved
   TELEMETRY_REPLY   = 0x83,  // one joint snapshot - see TelemetryPayload below
+  SENSOR_REPLY      = 0x84,  // every detected sensor's reading - see SensorKind below
 };
+
+// Payload of SENSOR_REPLY (little-endian, packed):
+//   uint32  t_ms     robot millis() when sampled
+//   uint8   count    sensor blocks that follow
+//   count x block:
+//     uint8    kind  SensorKind
+//     uint8    addr  its I2C address - tells two of the same kind apart
+//     uint8    n     number of values that follow
+//     float32  values[n], in the order its SensorKind entry lists (NaN if
+//              the sensor stopped answering)
+// protocol.py's SENSOR_KINDS gives each kind's value names and units. A kind
+// the host doesn't know still parses - n is in the block - so adding a kind
+// never changes this format.
+enum class SensorKind : uint8_t {
+  INA237 = 1,   // bus voltage V, shunt voltage mV, current mA, power mW, die temperature degC
+  MPU6050 = 2,  // accel x/y/z m/s^2, gyro x/y/z rad/s, temperature degC
+};
+static const size_t SENSOR_REPLY_HEADER_LEN = 5;  // t_ms + count
+static const size_t SENSOR_BLOCK_HEADER_LEN = 3;  // kind + addr + n
 
 // Payload of TELEMETRY_REPLY: one snapshot of all 8 joints, 56 bytes.
 // Position and current are read fresh; temperature is whatever the robot

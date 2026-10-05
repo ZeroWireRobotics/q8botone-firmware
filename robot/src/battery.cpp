@@ -1,5 +1,6 @@
 #include "battery.h"
 #include <BQ25887.h>
+#include "i2cBus.h"
 
 static BQ25887 charger;
 
@@ -38,6 +39,7 @@ static void readADCRegs() {
 }
 
 void batteryInit() {
+  I2CBusLock lock;  // the charger shares the bus with the Qwiic sensors
   charger.begin();
   charger.setWATCHDOG(0);              // Disable watchdog
   charger.wdReset();                   // Clear latch
@@ -47,10 +49,12 @@ void batteryInit() {
 }
 
 void batterySetCharging(bool enabled) {
+  I2CBusLock lock;
   charger.setEN_CHG(enabled);
 }
 
 float batteryGetADC() {
+  I2CBusLock lock;
   readADCRegs();
   return charger.getADC_VBAT();  // volts
 }
@@ -81,6 +85,7 @@ uint16_t batteryGetPercent() {
 }
 
 ChargeState batteryGetChargeState() {
+  I2CBusLock lock;
   charger.readChargeStatusReg();
   if (!charger.getPG_STAT()) return CHARGE_NONE;  // no valid source plugged in
 

@@ -17,7 +17,7 @@
 // any change the other side has to know about: a new or changed command or
 // reply, a payload layout, gait/direction IDs. Must equal protocol.py's
 // PROTOCOL_VERSION. Not yet exchanged or checked on connect.
-static const uint8_t PROTOCOL_VERSION = 1;
+static const uint8_t PROTOCOL_VERSION = 2;  // 2: SENSOR_REQUEST / SENSOR_REPLY
 
 static const uint8_t FRAME_START = 0xAA;
 static const size_t FRAME_HEADER_LEN = 2;   // msg_type, length
@@ -36,12 +36,14 @@ enum class CmdType : uint8_t {          // host -> robot
   HOST_CONNECTED  = 0x09,  // no payload - controller-local only, never forwarded to the robot
   LED_BRIGHTNESS  = 0x0A,  // {brightness: uint8, 0-255} - sets & persists the robot's RGB LED brightness
   TELEMETRY_REQUEST = 0x0B,  // no payload - ask for one joint snapshot; answered with TELEMETRY_REPLY
+  SENSOR_REQUEST  = 0x0C,  // no payload - sample the robot's Qwiic sensors; answered with SENSOR_REPLY
 };
 
 enum class ReplyType : uint8_t {        // robot -> host
   BATTERY_REPLY     = 0x81,
   RECORD_DATA_REPLY = 0x82,  // retired alongside RECORD_SEND; kept reserved
   TELEMETRY_REPLY   = 0x83,  // relayed verbatim; see the robot's protocol.h
+  SENSOR_REPLY      = 0x84,  // relayed verbatim; see the robot's protocol.h
 };
 
 inline uint16_t crc16Arc(const uint8_t* data, size_t len, uint16_t crc = 0x0000){

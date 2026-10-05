@@ -520,6 +520,11 @@ uint8_t q8Dynamixel::parseFrame(const uint8_t* buf, size_t bufCapacity) {
       // where it uses slack instead of delaying a frame.
       return 4;
 
+    case CmdType::SENSOR_REQUEST:
+      // Answered by sensorTask (see main.cpp) - the I2C reads shouldn't
+      // hold up the radio task that parses this.
+      return 5;
+
     case CmdType::RECORD_SEND:
       // Retired. Left as a no-op rather than removed so an older host that
       // still sends it gets ignored instead of falling through to default.

@@ -15,6 +15,8 @@
 #include "battery.h"
 #include "protocol.h"
 #include "gaitRunner.h"
+#include "i2cBus.h"
+#include "sensors.h"
 
 // Initialize global objects
 esp_now_peer_info_t peerInfo;
@@ -62,6 +64,12 @@ const uint8_t DEFAULT_LED_BRIGHTNESS = 128;
 // slack rather than delaying a frame.
 volatile bool telemetryRequested = false;
 uint32_t lastTelemetryRequestMs = 0;
+
+// Qwiic sensors (see sensors.h). espnowRxTask and the serial 's' command
+// only raise these; sensorTask does the I2C work, so neither the radio
+// task nor the small-stack serial task ever waits on the bus.
+volatile bool sensorsRequested = false;
+volatile bool sensorsPrintRequested = false;
 
 // Temperature is cached rather than read per sample: it sits outside the
 // contiguous 126-135 block the main read covers, and moves over seconds. The
@@ -297,6 +305,11 @@ void espnowRxTask(void* parameter) {
               // Joint telemetry - sampled and answered by gaitRunnerTask.
               telemetryRequested = true;
               lastTelemetryRequestMs = millis();
+              break;
+            }
+            case 5: {
+              // Qwiic sensors - sampled and answered by sensorTask.
+              sensorsRequested = true;
               break;
             }
 
@@ -643,6 +656,8 @@ void serialOutputTask(void* parameter) {
         toggleRail(rail5V, "5V");   // see toggleRail
       } else if (c == '6') {
         toggleRail(rail6V, "6V");
+      } else if (c == 's') {
+        sensorsPrintRequested = true;   // see sensorTask
       }
     }
 
@@ -711,6 +726,37 @@ void gaitRunnerTask(void* parameter) {
   }
 }
 
+void printLineQueued(const char* line) { queuePrint(MSG_INFO, "%s\n", line); }
+void printLineNow(const char* line) { Serial.println(line); }
+
+// FreeRTOS Task: Sensors (Priority 1) - answers SENSOR_REQUEST with a fresh
+// SENSOR_REPLY, and the serial 's' command with a readable dump. All
+// sensor I2C traffic happens here, so it only runs when something asks.
+void sensorTask(void* parameter) {
+  // Its own reply buffer, like gaitRunnerTask's telemetryMsg.
+  static DataMessage sensorMsg;
+  static uint8_t payload[sizeof(sensorMsg.data) - FRAME_OVERHEAD];
+
+  while (true) {
+    if (sensorsRequested) {
+      sensorsRequested = false;
+      if (paired) {
+        size_t len = sensorsBuildReply(payload, sizeof(payload));
+        sensorMsg.msgType = DATA;
+        sensorMsg.id = 0;
+        buildFrame((uint8_t)ReplyType::SENSOR_REPLY, payload, (uint8_t)len,
+                   (uint8_t*)sensorMsg.data);
+        esp_now_send(clientMac, (uint8_t*)&sensorMsg, sizeof(sensorMsg));
+      }
+    }
+    if (sensorsPrintRequested) {
+      sensorsPrintRequested = false;
+      sensorsPrint(printLineQueued);
+    }
+    vTaskDelay(pdMS_TO_TICKS(5));
+  }
+}
+
 // How long the 5V rail gets to come up (buck soft-start, then the RGB LED's
 // own power-on) before the LED is sent a color.
 const uint32_t RAIL_5V_SETTLE_MS = 20;
@@ -757,7 +803,7 @@ void setup() {
   // boot battery check right after can read a real percentage, and the
   // very first RGB activity after boot reflects battery level rather than
   // the pairing rainbow.
-  Wire.begin();
+  i2cBusBegin();
   batteryInit();
 
   // batteryInit() just enabled the BQ25887's continuous ADC - its first
@@ -796,6 +842,9 @@ void setup() {
     xTaskCreate(powerSavingTask, "PowerSaving", 2048, NULL, 1, NULL);
     return;
   }
+
+  // Before any task that could touch the bus exists.
+  sensorsBegin(printLineNow);
 
   bool initSuccess = true;
 
@@ -900,6 +949,19 @@ void setup() {
   );
   if (taskCreated != pdPASS) {
     Serial.println("[RTOS] Failed to create gait runner task");
+    initSuccess = false;
+  }
+
+  taskCreated = xTaskCreate(
+    sensorTask,         // Task function
+    "Sensors",          // Task name
+    4096,               // Stack size (bytes) - float formatting and the sensor libraries
+    NULL,               // Parameters
+    1,                  // Priority (low - only answers requests)
+    NULL                // Task handle
+  );
+  if (taskCreated != pdPASS) {
+    Serial.println("[RTOS] Failed to create sensor task");
     initSuccess = false;
   }
 
