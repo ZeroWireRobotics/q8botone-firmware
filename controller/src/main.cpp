@@ -782,6 +782,12 @@ void setup() {
   // the race entirely; queues/event group above must exist first since
   // onRecv() (registered below) pushes into rxQueue.
   WiFi.mode(WIFI_STA);
+  // Station mode defaults to modem power-save on the C3, which dozes the
+  // radio between transmissions - a robot reply landing in a doze waited
+  // until the controller next sent something (~a quarter of telemetry
+  // replies a full request period late). The controller lives on USB
+  // power, so keep the radio listening.
+  WiFi.setSleep(false);
   WiFi.macAddress(clientMac);
   esp_wifi_start();
   esp_wifi_set_promiscuous(true);
