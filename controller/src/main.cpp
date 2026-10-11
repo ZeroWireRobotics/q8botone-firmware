@@ -12,6 +12,7 @@
 #include "independentControl.h"
 #include "pinMapping.h"
 #include "RGBManager.h"
+#include "bakedRoutines.h"
 
 // Independent (gamepad) mode vs relay mode - see independentControlTask()
 // and commandForwardingTask()'s HOST_CONNECTED handling. Independent by
@@ -158,29 +159,115 @@ bool sendCommandToRobot(CmdType cmd, const uint8_t* payload = nullptr, uint8_t p
   return true;
 }
 
-// Moves all 4 legs to the given cyclable gait's own (x0, y0) neutral pose
-// (see independentControl.h's ikSolveNeutral()/INDEPENDENT_GAIT_NEUTRAL_*),
-// mirroring operate.py's move_xy(pos_x, pos_y, dur) - a raw MOVE, mirrored
-// across all 4 legs exactly like move_mirror() does. Payload layout must
-// match q8Dynamixel.cpp's MOVE case exactly: 8x int16 (tenths of a degree)
-// + uint16 dur + uint8 record flag, native (little-endian) byte order -
-// matches Python's struct.pack('<8hHB', ...) since ESP32 is also little-endian.
-bool sendMoveToGaitNeutral(uint8_t gaitCycleIndex, uint16_t durMs) {
-  float q1Deg, q2Deg;
-  ikSolveNeutral(INDEPENDENT_GAIT_NEUTRAL_X[gaitCycleIndex], INDEPENDENT_GAIT_NEUTRAL_Y[gaitCycleIndex], q1Deg, q2Deg);
-
-  int16_t angleTenths[8];
-  for (int leg = 0; leg < 4; leg++) {
-    angleTenths[leg * 2]     = (int16_t)lroundf(q1Deg * 10.0f);
-    angleTenths[leg * 2 + 1] = (int16_t)lroundf(q2Deg * 10.0f);
-  }
-
+// A raw MOVE: all 8 joints, in tenths of a degree, reached over durMs.
+// Payload layout must match q8Dynamixel.cpp's MOVE case exactly: 8x int16
+// (tenths of a degree) + uint16 dur + uint8 spare flag, native
+// (little-endian) byte order - matches Python's struct.pack('<8hHB', ...)
+// since ESP32 is also little-endian.
+bool sendMove(const int16_t angleTenths[8], uint16_t durMs) {
   uint8_t payload[19];
-  memcpy(payload, angleTenths, sizeof(angleTenths));
+  memcpy(payload, angleTenths, 8 * sizeof(int16_t));
   memcpy(payload + 16, &durMs, sizeof(durMs));
   payload[18] = 0;  // record = false
 
   return sendCommandToRobot(CmdType::MOVE, payload, sizeof(payload));
+}
+
+// The given cyclable gait's own (x0, y0) neutral pose (see
+// independentControl.h's ikSolveNeutral()/INDEPENDENT_GAIT_NEUTRAL_*) as 8
+// joint angles in tenths of a degree, mirrored across all 4 legs exactly
+// like move_mirror() does.
+void gaitNeutralTenths(uint8_t gaitCycleIndex, int16_t out[8]) {
+  float q1Deg, q2Deg;
+  ikSolveNeutral(INDEPENDENT_GAIT_NEUTRAL_X[gaitCycleIndex], INDEPENDENT_GAIT_NEUTRAL_Y[gaitCycleIndex], q1Deg, q2Deg);
+  for (int leg = 0; leg < 4; leg++) {
+    out[leg * 2]     = (int16_t)lroundf(q1Deg * 10.0f);
+    out[leg * 2 + 1] = (int16_t)lroundf(q2Deg * 10.0f);
+  }
+}
+
+// Moves all 4 legs to the given gait's neutral pose, mirroring operate.py's
+// move_xy(pos_x, pos_y, dur).
+bool sendMoveToGaitNeutral(uint8_t gaitCycleIndex, uint16_t durMs) {
+  int16_t angleTenths[8];
+  gaitNeutralTenths(gaitCycleIndex, angleTenths);
+  return sendMove(angleTenths, durMs);
+}
+
+// Gamepad A/B: plays one of the routines in bakedRoutines.h the way the
+// desktop app's Q8Bot.play_routine() does - one MOVE per waypoint, waiting out
+// its glide and pause before sending the next (MOVE doesn't block, so sending
+// early would cut the previous move short). Stance rows go to the current
+// gait's standing pose.
+//
+// Stepped from independentControlTask's loop rather than blocking it, so
+// START can still stop a routine and presses meanwhile are dropped instead
+// of piling up behind it.
+//
+// Waypoints that wouldn't visibly move the robot - within
+// ROUTINE_SAME_POSE_TENTHS of where it's already headed - aren't waited for:
+// a routine that opens with "stand" while the robot is standing starts
+// moving at once instead of after a second or two of nothing. Their dwell
+// still counts, and the final waypoint is always sent so the robot ends
+// exactly on it.
+const int16_t ROUTINE_SAME_POSE_TENTHS = 40;  // 4 degrees, on every joint
+
+struct RoutinePlayer {
+  const BakedRoutine* routine = nullptr;
+  uint8_t next = 0;
+  uint32_t nextAtMs = 0;
+  int16_t target[8] = {};   // where the robot was last sent
+  bool targetKnown = false;
+
+  bool active() const { return routine != nullptr; }
+};
+
+bool samePose(const int16_t a[8], const int16_t b[8]) {
+  for (int i = 0; i < 8; i++) {
+    if (abs(a[i] - b[i]) > ROUTINE_SAME_POSE_TENTHS) return false;
+  }
+  return true;
+}
+
+// atStance: the robot is known to be standing on stance already.
+void startRoutine(RoutinePlayer& player, const BakedRoutine& routine, bool atStance, const int16_t stance[8]) {
+  player.routine = &routine;
+  player.next = 0;
+  player.nextAtMs = millis();
+  player.targetKnown = atStance;
+  if (atStance) memcpy(player.target, stance, sizeof(player.target));
+  queuePrint(MSG_INFO, "[GAMEPAD] Playing %s\n", routine.name);
+}
+
+// Sends every waypoint that's due. Returns true on the call where the
+// routine ends (finished, or the robot stopped being paired).
+bool stepRoutine(RoutinePlayer& player, const int16_t stance[8]) {
+  uint32_t now = millis();
+  while (player.active() && (int32_t)(now - player.nextAtMs) >= 0) {
+    if (player.next >= player.routine->count) {
+      player.routine = nullptr;
+      return true;
+    }
+    const RoutineWaypoint& wp = player.routine->waypoints[player.next];
+    const int16_t* goal = wp.stance ? stance : wp.angleTenths;
+    bool last = (player.next == player.routine->count - 1);
+    bool moves = !(player.targetKnown && samePose(goal, player.target));
+
+    uint32_t waitMs = wp.holdMs;
+    if (moves || last) {
+      if (!sendMove(goal, wp.moveMs)) {
+        queuePrint(MSG_INFO, "[GAMEPAD] %s stopped - robot not paired\n", player.routine->name);
+        player.routine = nullptr;
+        return true;
+      }
+      memcpy(player.target, goal, sizeof(player.target));
+      player.targetKnown = true;
+      if (moves) waitMs += wp.moveMs;
+    }
+    player.next++;
+    player.nextAtMs += waitMs;
+  }
+  return false;
 }
 
 
@@ -598,6 +685,19 @@ void rgbStatusTask(void* parameter) {
 // independentControl.h for the ported direction/tier decision logic this
 // is built on.
 // ============================================================================
+// The robot plays JUMP and GREET itself, can't take another command until
+// it's done, and nothing tells the controller when that is - so the
+// controller waits these out, taken from the delay() calls in the robot
+// firmware's q8Dynamixel::jump()/greet() (keep them in step). Presses
+// meanwhile are dropped rather than queueing up on the robot.
+const uint32_t ROBOT_JUMP_MS = 4400;
+const uint32_t ROBOT_GREET_MS = 6450;
+// Then back to the current gait's stance: the robot's own greet ends
+// folded and its jump on a fixed rest pose. Same as the desktop app's
+// Q8Bot.greet()/jump(), which follow with stand(1000)/stand(500).
+const uint16_t GREET_RETURN_MS = 1000;
+const uint16_t JUMP_RETURN_MS = 500;
+
 void independentControlTask(void* parameter) {
   const uint8_t GAIT_COUNT = 5;              // Matches INDEPENDENT_GAIT_IDS/NAMES size
   const uint32_t GAIT_RESEND_MS = 250;       // Matches operate.py's NATIVE_GAIT_RESEND_INTERVAL
@@ -613,6 +713,13 @@ void independentControlTask(void* parameter) {
   bool pairingComboLatched = false;
   bool wasPaired = false;
 
+  uint32_t busyUntilMs = 0;        // a JUMP/GREET is still playing out on the robot until then
+  bool jumpRecoveryDue = false;    // after a jump: motors back on, then stand
+  uint32_t jumpRecoverAtMs = 0;
+  bool atStance = false;           // robot is known to be standing on the current gait's stance
+  RoutinePlayer routinePlayer;     // A/B routine in progress, if any
+  int16_t stance[8];               // the current gait's stance, in MOVE's tenths of a degree
+
   while (true) {
     gamepad.update();
 
@@ -623,6 +730,8 @@ void independentControlTask(void* parameter) {
         sendCommandToRobot(CmdType::GAIT_STOP);
         gaitActive = false;
       }
+      routinePlayer.routine = nullptr;
+      jumpRecoveryDue = false;
       vTaskDelayUntil(&lastWake, pdMS_TO_TICKS(GamepadQT::GAMEPAD_POLL_MS));
       continue;
     }
@@ -655,8 +764,15 @@ void independentControlTask(void* parameter) {
       wasPaired = true;
       torqued = false;
       gaitActive = false;
+      atStance = false;
+      jumpRecoveryDue = false;
+      routinePlayer.routine = nullptr;
     }
 
+    uint32_t now = millis();
+    gaitNeutralTenths(gaitCycleIndex, stance);
+
+    // START always works, even mid-move: motors off stops a routine too.
     if (gamepad.wasPressed(GamepadQT::BTN_START)) {
       torqued = !torqued;
       uint8_t val = torqued ? 1 : 0;
@@ -666,8 +782,36 @@ void independentControlTask(void* parameter) {
         // leaving legs wherever they physically were while untorqued -
         // avoids a jerky snap into the trajectory on the next GAIT_RUN.
         sendMoveToGaitNeutral(gaitCycleIndex, 500);
+        atStance = true;
+      } else {
+        atStance = false;
+        jumpRecoveryDue = false;  // don't turn back on motors the user just turned off
+        if (routinePlayer.active()) {
+          queuePrint(MSG_INFO, "[GAMEPAD] %s stopped\n", routinePlayer.routine->name);
+          routinePlayer.routine = nullptr;
+        }
       }
       queuePrint(MSG_INFO, "[GAMEPAD] Torque %s\n", torqued ? "ON" : "OFF");
+    }
+
+    // A jump can brown the robot out and reset it with its motors off, so -
+    // like the app - turn them back on once it's landed, then stand.
+    if (jumpRecoveryDue && (int32_t)(now - jumpRecoverAtMs) >= 0) {
+      jumpRecoveryDue = false;
+      uint8_t on = 1;
+      sendCommandToRobot(CmdType::TORQUE_SET, &on, 1);
+      sendMoveToGaitNeutral(gaitCycleIndex, JUMP_RETURN_MS);
+    }
+
+    if (routinePlayer.active() && stepRoutine(routinePlayer, stance)) {
+      atStance = routinePlayer.targetKnown && samePose(routinePlayer.target, stance);
+    }
+
+    // While a move or routine plays, every other button and the stick are
+    // ignored - so presses are dropped instead of piling up behind it.
+    if (routinePlayer.active() || (int32_t)(busyUntilMs - now) > 0) {
+      vTaskDelayUntil(&lastWake, pdMS_TO_TICKS(GamepadQT::GAMEPAD_POLL_MS));
+      continue;
     }
 
     if (gamepad.wasPressed(GamepadQT::BTN_SELECT)) {
@@ -682,16 +826,46 @@ void independentControlTask(void* parameter) {
       // Settle into the new gait's own neutral stance immediately, same as
       // operate.py's switch_gait handler's move_xy(pos_x, pos_y, 500).
       sendMoveToGaitNeutral(gaitCycleIndex, 500);
+      gaitNeutralTenths(gaitCycleIndex, stance);
+      atStance = true;
       queuePrint(MSG_INFO, "[GAMEPAD] Switched to %s\n", INDEPENDENT_GAIT_NAMES[gaitCycleIndex]);
     }
 
-    if (gamepad.wasPressed(GamepadQT::BTN_Y)) {
-      sendCommandToRobot(CmdType::JUMP);
-      queuePrint(MSG_INFO, "[GAMEPAD] Jump\n");
-    }
-    if (gamepad.wasPressed(GamepadQT::BTN_X)) {
-      sendCommandToRobot(CmdType::GREET);
-      queuePrint(MSG_INFO, "[GAMEPAD] Greet\n");
+    // Moves: Y jump, X greet, A/B the routines baked in from the desktop
+    // app. Motors must be on - with them off the servos can't follow.
+    bool pressedY = gamepad.wasPressed(GamepadQT::BTN_Y);
+    bool pressedX = gamepad.wasPressed(GamepadQT::BTN_X);
+    bool pressedA = gamepad.wasPressed(GamepadQT::BTN_A);
+    bool pressedB = gamepad.wasPressed(GamepadQT::BTN_B);
+    if (pressedY || pressedX || pressedA || pressedB) {
+      if (!torqued) {
+        queuePrint(MSG_INFO, "[GAMEPAD] Move ignored - motors are off (press START)\n");
+      } else {
+        if (gaitActive) {
+          sendCommandToRobot(CmdType::GAIT_STOP);
+          gaitActive = false;
+        }
+        if (pressedY) {
+          sendCommandToRobot(CmdType::JUMP);
+          jumpRecoverAtMs = now + ROBOT_JUMP_MS;
+          jumpRecoveryDue = true;
+          busyUntilMs = jumpRecoverAtMs + JUMP_RETURN_MS;
+          atStance = true;  // once the recovery stand is done
+          queuePrint(MSG_INFO, "[GAMEPAD] Jump\n");
+        } else if (pressedX) {
+          sendCommandToRobot(CmdType::GREET);
+          // Queued on the robot, so it runs as soon as the greet ends.
+          sendMoveToGaitNeutral(gaitCycleIndex, GREET_RETURN_MS);
+          busyUntilMs = now + ROBOT_GREET_MS + GREET_RETURN_MS;
+          atStance = true;
+          queuePrint(MSG_INFO, "[GAMEPAD] Greet\n");
+        } else {
+          startRoutine(routinePlayer, pressedA ? ROUTINE_A : ROUTINE_B, atStance, stance);
+          stepRoutine(routinePlayer, stance);  // its first move goes out now, not next tick
+        }
+        vTaskDelayUntil(&lastWake, pdMS_TO_TICKS(GamepadQT::GAMEPAD_POLL_MS));
+        continue;  // the stick waits until the move is done
+      }
     }
 
     // Joystick -> movement (always native GAIT_RUN - no host to stream raw positions to).
@@ -704,6 +878,7 @@ void independentControlTask(void* parameter) {
         sendCommandToRobot(CmdType::GAIT_STOP);
         sendMoveToGaitNeutral(gaitCycleIndex, 0);  // Immediate, matching operate.py's idle-transition move_xy(..., 0)
         gaitActive = false;
+        atStance = true;
       }
     } else {
       uint8_t sendGaitId = INDEPENDENT_GAIT_IDS[gaitCycleIndex];
@@ -715,7 +890,6 @@ void independentControlTask(void* parameter) {
       }
 
       uint8_t directionId = (uint8_t)dir;
-      uint32_t now = millis();
       bool changed = !gaitActive || sendGaitId != lastSentGaitId || directionId != lastSentDirectionId;
       bool resendDue = (now - lastSendMs) >= GAIT_RESEND_MS;
 
@@ -723,6 +897,7 @@ void independentControlTask(void* parameter) {
         uint8_t payload[2] = {sendGaitId, directionId};
         sendCommandToRobot(CmdType::GAIT_RUN, payload, 2);
         gaitActive = true;
+        atStance = false;
         lastSentGaitId = sendGaitId;
         lastSentDirectionId = directionId;
         lastSendMs = now;
