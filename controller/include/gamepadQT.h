@@ -21,8 +21,7 @@ class GamepadQT {
   public:
     enum Button { BTN_X, BTN_Y, BTN_A, BTN_B, BTN_SELECT, BTN_START, BUTTON_COUNT };
 
-    // Poll cadence this class is designed to be called at (matches
-    // PowerManager::POLL_MS's existing convention for a debounced input).
+    // Poll cadence this class is designed to be called at.
     static const uint32_t GAMEPAD_POLL_MS = 20;
 
     bool begin(uint8_t addr = 0x50);

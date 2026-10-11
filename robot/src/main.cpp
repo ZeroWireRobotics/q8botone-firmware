@@ -6,7 +6,6 @@
 #include <Dynamixel2Arduino.h>
 // Q8bot-specific Modules
 #include "q8Dynamixel.h"
-#include "userParams.h"
 #include "systemParams.h"
 #include "pinMapping.h"
 #include "macStorage.h"
@@ -668,7 +667,8 @@ void serialOutputTask(void* parameter) {
 
 // FreeRTOS Task: Gait Runner (Priority 2)
 // Steps an active native gait (see GaitRunner/gaitTables.h) at a fixed
-// cadence matching the host's own per-tick pace (SPEED=200 in operate.py).
+// cadence matching the host's own per-tick pace (TICK_HZ = 200 in
+// q8botone-python's robot.py).
 // espnowRxTask stays purely reactive - GAIT_RUN/GAIT_STOP/MOVE commands are
 // still processed immediately there; this task only advances the phase.
 void gaitRunnerTask(void* parameter) {

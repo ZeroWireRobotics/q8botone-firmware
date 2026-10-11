@@ -186,8 +186,8 @@ void gaitNeutralTenths(uint8_t gaitCycleIndex, int16_t out[8]) {
   }
 }
 
-// Moves all 4 legs to the given gait's neutral pose, mirroring operate.py's
-// move_xy(pos_x, pos_y, dur).
+// Moves all 4 legs to the given gait's neutral pose, like the desktop app's
+// Q8Bot.stand(dur).
 bool sendMoveToGaitNeutral(uint8_t gaitCycleIndex, uint16_t durMs) {
   int16_t angleTenths[8];
   gaitNeutralTenths(gaitCycleIndex, angleTenths);
@@ -700,7 +700,7 @@ const uint16_t JUMP_RETURN_MS = 500;
 
 void independentControlTask(void* parameter) {
   const uint8_t GAIT_COUNT = 5;              // Matches INDEPENDENT_GAIT_IDS/NAMES size
-  const uint32_t GAIT_RESEND_MS = 250;       // Matches operate.py's NATIVE_GAIT_RESEND_INTERVAL
+  const uint32_t GAIT_RESEND_MS = 250;       // Matches robot.py's NATIVE_GAIT_RESEND_INTERVAL
 
   TickType_t lastWake = xTaskGetTickCount();
   uint8_t trotTierIndex = 2;       // Index into TROT_TIER_GAIT_IDS - starts at fastest
@@ -821,10 +821,10 @@ void independentControlTask(void* parameter) {
         gaitActive = false;
       }
       if (INDEPENDENT_GAIT_IDS[gaitCycleIndex] == TROT_TIER_GAIT_IDS[2]) {
-        trotTierIndex = 2;  // Start fresh at fastest, matching operate.py's switch_gait convention
+        trotTierIndex = 2;  // Start fresh at fastest, as the desktop app does on a gait switch
       }
-      // Settle into the new gait's own neutral stance immediately, same as
-      // operate.py's switch_gait handler's move_xy(pos_x, pos_y, 500).
+      // Settle into the new gait's own neutral stance immediately, as the
+      // desktop app's Q8Bot.set_gait() does.
       sendMoveToGaitNeutral(gaitCycleIndex, 500);
       gaitNeutralTenths(gaitCycleIndex, stance);
       atStance = true;
@@ -876,7 +876,7 @@ void independentControlTask(void* parameter) {
     if (dir == Direction::NONE) {
       if (gaitActive) {
         sendCommandToRobot(CmdType::GAIT_STOP);
-        sendMoveToGaitNeutral(gaitCycleIndex, 0);  // Immediate, matching operate.py's idle-transition move_xy(..., 0)
+        sendMoveToGaitNeutral(gaitCycleIndex, 0);  // Immediate, matching the desktop app's Q8Bot.idle()
         gaitActive = false;
         atStance = true;
       }

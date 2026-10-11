@@ -1,7 +1,7 @@
 /*
   q8Dynamixel.h - Wrapper for the Robotis Dynamixel2Arduino library.
   Created by Eric Wu, April 21st, 2024.
-  Released into the public domain.
+  MIT License - see LICENSE at the repository root.
 */
 
 #include <Arduino.h>
@@ -443,10 +443,9 @@ void q8Dynamixel::trotDemo(){
     {10.30f, 91.80f, 62.20f, 158.80f, 62.20f, 158.80f, 10.30f, 91.80f},
   };
 
-  // Matches the host's actual full-speed playback rate: operate.py never
-  // sets a per-frame DXL profile for gait ticks (move_all always passes
-  // dur=0, i.e. max speed/no ramp) - the tick rate is capped at
-  // clock.tick(SPEED=200), i.e. ~5ms per frame.
+  // Matches the host's full-speed playback rate: the desktop app's Q8Bot
+  // streams gait frames with dur=0 (max speed, no ramp) at TICK_HZ = 200,
+  // i.e. ~5ms per frame.
   const uint16_t frameDelay = 5;      // ms between frames - fast, no ramp
   const uint16_t segmentGapMs = 500;  // pause between forward and backward
 

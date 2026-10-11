@@ -1,7 +1,7 @@
 /*
   q8Dynamixel.h - Wrapper for the Robotis Dynamixel2Arduino library.
   Created by Eric Wu, April 21st, 2024.
-  Released into the public domain.
+  MIT License - see LICENSE at the repository root.
 */
 #ifndef q8Dynamixel_h
 #define q8Dynamixel_h
