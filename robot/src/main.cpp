@@ -684,7 +684,14 @@ void gaitRunnerTask(void* parameter) {
   static uint32_t lastTempSampleMs = 0;
 
   while (true) {
-    if (gaitRunner.isActive()) {
+    if (gaitRunner.keepAliveExpired()) {
+      // The driver went quiet mid-walk: stop and stand rather than walk
+      // on until someone powers the robot off.
+      gaitRunner.stop();
+      q8.moveToIdle(500);
+      queuePrint(MSG_INFO, "[GAIT] No GAIT_RUN for %lums - stopped\n",
+                 (unsigned long)GaitRunner::KEEPALIVE_TIMEOUT_MS);
+    } else if (gaitRunner.isActive()) {
       gaitRunner.tick();
     }
 

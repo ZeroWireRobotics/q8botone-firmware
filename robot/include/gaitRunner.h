@@ -23,6 +23,10 @@ class GaitRunner {
     // the phase over, matching GaitManager.start_movement()'s behavior in
     // q8botone-python (all direction tables for one gait share a frame count,
     // so this stays continuous, no stutter on turning).
+    //
+    // Also the keep-alive: whoever drives the robot repeats GAIT_RUN while
+    // it should keep walking (the host library and the controller both
+    // every 250ms), and a repeat lands here too. See keepAliveExpired().
     void start(uint8_t gaitId, uint8_t directionId);
 
     // Stops autonomous playback. Does not move the legs anywhere - caller
@@ -35,12 +39,21 @@ class GaitRunner {
 
     bool isActive() const;
 
+    // True when a gait is running but no GAIT_RUN has arrived for
+    // KEEPALIVE_TIMEOUT_MS - the host or controller went away (script ended,
+    // USB pulled, out of range, battery out) without sending GAIT_STOP, and
+    // the robot shouldn't walk on forever.
+    bool keepAliveExpired() const;
+
+    static const uint32_t KEEPALIVE_TIMEOUT_MS = 1000;  // four missed 250ms repeats
+
   private:
     q8Dynamixel& _q8;
     bool _active = false;
     uint8_t _gaitId = 0;
     uint8_t _directionId = 0;
     uint16_t _phaseIndex = 0;
+    volatile uint32_t _lastStartMs = 0;  // set from the radio task, read by the gait task
 };
 
 #endif

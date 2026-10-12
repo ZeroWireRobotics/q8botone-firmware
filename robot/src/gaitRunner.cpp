@@ -13,6 +13,7 @@ void GaitRunner::start(uint8_t gaitId, uint8_t directionId){
 
   _gaitId = gaitId;
   _directionId = directionId;
+  _lastStartMs = millis();
   _active = true;
 }
 
@@ -22,6 +23,10 @@ void GaitRunner::stop(){
 
 bool GaitRunner::isActive() const {
   return _active;
+}
+
+bool GaitRunner::keepAliveExpired() const {
+  return _active && (millis() - _lastStartMs) > KEEPALIVE_TIMEOUT_MS;
 }
 
 void GaitRunner::tick(){
