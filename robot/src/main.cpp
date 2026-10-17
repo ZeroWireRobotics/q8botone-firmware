@@ -16,6 +16,7 @@
 #include "gaitRunner.h"
 #include "i2cBus.h"
 #include "sensors.h"
+#include "motorSetup.h"
 
 // Initialize global objects
 esp_now_peer_info_t peerInfo;
@@ -850,7 +851,10 @@ void setup() {
     return;
   }
 
-  // Before any task that could touch the bus exists.
+  // Before any task that could touch the bus exists - the servo bus here,
+  // the I2C bus just below. The 6V rail has been on since the top of
+  // setup(), so the servos have had a few seconds to boot.
+  motorSetupCheck(q8dxl, printLineNow);
   sensorsBegin(printLineNow);
 
   bool initSuccess = true;
