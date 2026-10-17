@@ -854,7 +854,12 @@ void setup() {
   // Before any task that could touch the bus exists - the servo bus here,
   // the I2C bus just below. The 6V rail has been on since the top of
   // setup(), so the servos have had a few seconds to boot.
-  motorSetupCheck(q8dxl, printLineNow);
+  // A slot without its servo means a robot being built or repaired: stay in
+  // motor setup until every slot is filled (or 'q' skips it), then carry on.
+  MotorReport motors = motorSetupCheck(q8dxl, printLineNow);
+  if (motors.found < MOTOR_COUNT) {
+    motorSetupRun(q8dxl, rgb, LED_PIN, FIRMWARE_ID, printLineNow);
+  }
   sensorsBegin(printLineNow);
 
   bool initSuccess = true;

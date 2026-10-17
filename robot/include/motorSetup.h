@@ -35,3 +35,21 @@ typedef void (*MotorPrintFn)(const char* line);
 // and a summary. Writes nothing to any servo. Call before anything else
 // uses the bus (it changes the bus baud rate, and leaves it at 1 Mbps).
 MotorReport motorSetupCheck(Dynamixel2Arduino& dxl, MotorPrintFn print);
+
+class RGBManager;
+
+// Motor setup mode, for when motorSetupCheck() finds slots without their
+// servo. Blinks the status light yellow N times, then pauses, for "plug a
+// new servo into slot N" (the lowest empty slot); when a factory-default
+// servo appears, sets it up as that slot's servo, checks it, flashes
+// green and moves on to the next empty slot. A servo that's already set up
+// is just counted. Once all 8 answer, waits a moment and runs the full
+// check again before returning, so boot carries on with all 8 confirmed.
+//
+// Serial: 'q' skips setup and returns (boot carries on without the missing
+// servos); 'i' prints firmwareId, so the desktop app can still tell this
+// board is a robot. Returns true if all 8 servos ended up set up.
+//
+// Blocks - call from setup(), before the tasks that use the bus exist.
+bool motorSetupRun(Dynamixel2Arduino& dxl, RGBManager& rgb, uint8_t ledPin,
+                   const char* firmwareId, MotorPrintFn print);
