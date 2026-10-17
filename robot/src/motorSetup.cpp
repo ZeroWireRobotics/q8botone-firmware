@@ -130,16 +130,22 @@ namespace {
   const char NO_POWER_HINT[] =
       "[MOTORS] No servo answers at all - is the robot switched on? On USB power alone the servos are off.";
 
-  // Status light: `count` yellow blinks, a pause, repeat. The chip LED
-  // blinks along. Only touches the LEDs when the state changes.
+  // Status light while waiting for slot `count`: a green blink for each
+  // slot before it (all set up - it's the lowest empty one), then a yellow
+  // blink for the slot it's waiting on, a pause, repeat. The chip LED blinks
+  // along. Only touches the LEDs when the state changes.
   void showBlinks(RGBManager& rgb, uint8_t ledPin, uint8_t count, uint32_t elapsed, int8_t& shown) {
     const uint32_t cycle = count * BLINK_PERIOD_MS + BLINK_GAP_MS;
     const uint32_t t = elapsed % cycle;
-    const int8_t on = (t < count * BLINK_PERIOD_MS && (t % BLINK_PERIOD_MS) < BLINK_ON_MS) ? 1 : 0;
-    if (on == shown) return;
-    shown = on;
-    if (on) rgb.setColor(255, 160, 0); else rgb.off();
-    digitalWrite(ledPin, on ? HIGH : LOW);
+    const bool lit = t < count * BLINK_PERIOD_MS && (t % BLINK_PERIOD_MS) < BLINK_ON_MS;
+    const bool last = t / BLINK_PERIOD_MS == count - 1u;
+    const int8_t state = !lit ? 0 : (last ? 2 : 1);     // 0 off, 1 green, 2 yellow
+    if (state == shown) return;
+    shown = state;
+    if (state == 2) rgb.setColor(255, 160, 0);
+    else if (state == 1) rgb.setColor(0, 255, 0);
+    else rgb.off();
+    digitalWrite(ledPin, state ? HIGH : LOW);
   }
 
   void flash(RGBManager& rgb, uint8_t ledPin, uint8_t r, uint8_t g, uint8_t b, uint32_t ms) {
@@ -310,7 +316,8 @@ uint8_t motorFactoryResetAll(Dynamixel2Arduino& dxl, MotorPrintFn print) {
 bool motorSetupRun(Dynamixel2Arduino& dxl, RGBManager& rgb, uint8_t ledPin,
                    const char* firmwareId, MotorPrintFn print) {
   say(print, "[MOTORS] ---- Motor setup ----");
-  say(print, "[MOTORS] The light blinks yellow N times for: plug a new servo into slot N.");
+  say(print, "[MOTORS] The light blinks green once for each slot before the one it wants, then yellow:");
+  say(print, "[MOTORS] green, green, yellow = plug a new servo into slot 3.");
   say(print, "[MOTORS] Switch the robot off before plugging a servo in, and add one new servo at a time.");
   say(print, "[MOTORS] Type q to skip setup and start anyway.");
 
@@ -382,8 +389,13 @@ bool motorSetupRun(Dynamixel2Arduino& dxl, RGBManager& rgb, uint8_t ledPin,
 
       next = firstMissing;
       if (next != announced) {
-        say(print, "[MOTORS] %u/8 servos set up. Next: plug a new servo into slot %u (%s leg) "
-            "- the light blinks %u time%s", found, next + 1, LEG[next], next + 1, next ? "s" : "");
+        if (next == 0) {
+          say(print, "[MOTORS] %u/8 servos set up. Next: plug a new servo into slot 1 (%s leg) "
+              "- the light blinks yellow", found, LEG[0]);
+        } else {
+          say(print, "[MOTORS] %u/8 servos set up. Next: plug a new servo into slot %u (%s leg) "
+              "- the light blinks green %u time%s, then yellow", found, next + 1, LEG[next], next, next > 1 ? "s" : "");
+        }
         announced = next;
         patternStart = now;
         lastReminder = now;
