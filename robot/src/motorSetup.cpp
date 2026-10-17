@@ -33,9 +33,9 @@ namespace {
   // Setup mode timing.
   const uint32_t POLL_MS = 500;          // how often the bus is checked
   const uint32_t REMINDER_MS = 15000;    // repeat the "waiting for slot N" line
-  const uint32_t BLINK_ON_MS = 250;
-  const uint32_t BLINK_PERIOD_MS = 500;  // one blink: on, then off for the rest
-  const uint32_t BLINK_GAP_MS = 1500;    // pause between counts
+  const uint32_t BLINK_ON_MS = 165;
+  const uint32_t BLINK_PERIOD_MS = 330;  // one blink: on, then off for the rest
+  const uint32_t BLINK_GAP_MS = 1000;    // pause between counts
   const uint32_t COOLDOWN_MS = 2000;     // all 8 in: settle, then check once more
   const uint8_t BAUD_1M_CODE = 3;        // BAUD_RATE item value for 1 Mbps
   const uint32_t EEPROM_SETTLE_MS = 50;  // after the ID and baud writes, as the old tool did
@@ -429,7 +429,8 @@ bool motorSetupRun(Dynamixel2Arduino& dxl, RGBManager& rgb, uint8_t ledPin,
       }
       dxl.begin(ROBOT_BAUD);
       if (tried) {
-        if (done) flash(rgb, ledPin, 0, 255, 0, 800); else flash(rgb, ledPin, 255, 0, 0, 800);
+        // Success needs no flash of its own - the count gains a green blink.
+        if (!done) flash(rgb, ledPin, 255, 0, 0, 800);
         shown = -1;
         lastPoll = millis() - POLL_MS;   // look again straight away
         continue;

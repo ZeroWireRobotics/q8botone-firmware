@@ -54,8 +54,8 @@ class RGBManager;
 // servo. For "plug a new servo into slot N" (the lowest empty slot) the
 // status light blinks green N-1 times - the slots before it, all set up -
 // then yellow once, then pauses; when a factory-default
-// servo appears, sets it up as that slot's servo, checks it, flashes
-// green and moves on to the next empty slot. A servo that's already set up
+// servo appears, sets it up as that slot's servo, checks it and moves on
+// to the next empty slot - one more green blink. A servo that's already set up
 // is just counted. Once all 8 answer, waits a moment and runs the full
 // check again before returning, so boot carries on with all 8 confirmed.
 //
