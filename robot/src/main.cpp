@@ -70,6 +70,10 @@ uint32_t lastTelemetryRequestMs = 0;
 // task nor the small-stack serial task ever waits on the bus.
 volatile bool sensorsRequested = false;
 volatile bool sensorsPrintRequested = false;
+// Serial F starts a factory reset of the servos; Y within 5 s confirms it.
+// When F was typed, 0 if it was not. Only serialOutputTask touches it.
+uint32_t factoryResetAskedAt = 0;
+void printLineNow(const char* line);   // defined below, with the sensor task
 
 // Temperature is cached rather than read per sample: it sits outside the
 // contiguous 126-135 block the main read covers, and moves over seconds. The
@@ -658,6 +662,23 @@ void serialOutputTask(void* parameter) {
         toggleRail(rail6V, "6V");
       } else if (c == 's') {
         sensorsPrintRequested = true;   // see sensorTask
+      } else if (c == 'F') {
+        factoryResetAskedAt = millis();
+        queuePrint(MSG_INFO, "[MOTORS] Type Y within 5 s to reset all 8 servos to factory settings - "
+                             "they'll need setting up again, one at a time\n");
+      } else if (c == 'Y' && factoryResetAskedAt && millis() - factoryResetAskedAt < 5000) {
+        factoryResetAskedAt = 0;
+        // Nothing else may drive the servos from here on: stop any gait,
+        // motors off, and keep the bus until the restart.
+        gaitRunner.stop();
+        q8.toggleTorque(0);
+        q8.resetTorqueState();
+        q8.lockBus();
+        motorFactoryResetAll(q8dxl, printLineNow);
+        Serial.println("[MOTORS] Restarting into motor setup");
+        Serial.flush();
+        delay(200);
+        ESP.restart();
       }
     }
 
@@ -857,6 +878,7 @@ void setup() {
   // A slot without its servo means a robot being built or repaired: stay in
   // motor setup until every slot is filled (or 'q' skips it), then carry on.
   MotorReport motors = motorSetupCheck(q8dxl, printLineNow);
+  if (motors.wrongSettings) motorSetupFix(q8dxl, motors, printLineNow);
   if (motors.found < MOTOR_COUNT) {
     motorSetupRun(q8dxl, rgb, LED_PIN, FIRMWARE_ID, printLineNow);
   }

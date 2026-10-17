@@ -36,6 +36,18 @@ typedef void (*MotorPrintFn)(const char* line);
 // uses the bus (it changes the bus baud rate, and leaves it at 1 Mbps).
 MotorReport motorSetupCheck(Dynamixel2Arduino& dxl, MotorPrintFn print);
 
+// Correct the EEPROM settings of each slot that motorSetupCheck() reported
+// as differing: writes only the items that are wrong, then reads them back.
+// Updates report; returns how many slots are still wrong.
+uint8_t motorSetupFix(Dynamixel2Arduino& dxl, MotorReport& report, MotorPrintFn print);
+
+// Serial F, then Y: put every servo that answers as one of the robot's IDs
+// (11-18, at 1 Mbps) back to its factory settings - ID 1, 57600 baud, every
+// setting at its default. Returns how many were reset. Afterwards they all
+// answer as ID 1, so setting them up again means plugging them in one at a
+// time - motorSetupRun() won't set up two at once.
+uint8_t motorFactoryResetAll(Dynamixel2Arduino& dxl, MotorPrintFn print);
+
 class RGBManager;
 
 // Motor setup mode, for when motorSetupCheck() finds slots without their
@@ -46,9 +58,14 @@ class RGBManager;
 // is just counted. Once all 8 answer, waits a moment and runs the full
 // check again before returning, so boot carries on with all 8 confirmed.
 //
+// Two new servos plugged in at once would both take the same ID, so a new
+// servo is only set up when exactly one answers; otherwise the light
+// flashes red and the serial monitor asks for all but one to be unplugged.
+//
 // Serial: 'q' skips setup and returns (boot carries on without the missing
 // servos); 'i' prints firmwareId, so the desktop app can still tell this
-// board is a robot. Returns true if all 8 servos ended up set up.
+// board is a robot; 'F' then 'Y' resets the servos to factory settings, as
+// in normal running. Returns true if all 8 servos ended up set up.
 //
 // Blocks - call from setup(), before the tasks that use the bus exist.
 bool motorSetupRun(Dynamixel2Arduino& dxl, RGBManager& rgb, uint8_t ledPin,
