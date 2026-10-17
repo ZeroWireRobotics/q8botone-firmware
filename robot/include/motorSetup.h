@@ -60,8 +60,9 @@ class RGBManager;
 // check again before returning, so boot carries on with all 8 confirmed.
 //
 // Two new servos plugged in at once would both take the same ID, so a new
-// servo is only set up when exactly one answers; otherwise the light
-// flashes red and the serial monitor asks for all but one to be unplugged.
+// servo is only set up when exactly one answers; otherwise the light blinks
+// nothing but red, fast and steady, and the serial monitor asks for all but
+// one to be unplugged.
 //
 // Serial: 'q' skips setup and returns (boot carries on without the missing
 // servos); 'i' prints firmwareId, so the desktop app can still tell this

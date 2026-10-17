@@ -148,6 +148,17 @@ namespace {
     digitalWrite(ledPin, state ? HIGH : LOW);
   }
 
+  // More than one new servo plugged in: nothing but fast, steady red blinks
+  // until it's down to one - red always means "fix this first", never mixed
+  // with the green-and-yellow count.
+  void showRed(RGBManager& rgb, uint8_t ledPin, uint32_t now, int8_t& shown) {
+    const int8_t state = (now % BLINK_PERIOD_MS) < BLINK_ON_MS ? 3 : 0;   // 3 red, 0 off
+    if (state == shown) return;
+    shown = state;
+    if (state) rgb.setColor(255, 0, 0); else rgb.off();
+    digitalWrite(ledPin, state ? HIGH : LOW);
+  }
+
   void flash(RGBManager& rgb, uint8_t ledPin, uint8_t r, uint8_t g, uint8_t b, uint32_t ms) {
     rgb.setColor(r, g, b);
     digitalWrite(ledPin, HIGH);
@@ -327,6 +338,7 @@ bool motorSetupRun(Dynamixel2Arduino& dxl, RGBManager& rgb, uint8_t ledPin,
   uint32_t patternStart = millis(), lastPoll = 0, lastReminder = millis();
   uint32_t resetAskedAt = 0;      // when F was typed, 0 if it wasn't
   bool warnedSeveral = false;     // "more than one new servo" said since the last change
+  bool several = false;           // more than one new servo answering right now - light shows red
   bool silent = false;            // nothing answered on the last look (see NO_POWER_HINT)
 
   while (true) {
@@ -370,6 +382,7 @@ bool motorSetupRun(Dynamixel2Arduino& dxl, RGBManager& rgb, uint8_t ledPin,
       }
 
       if (found == MOTOR_COUNT) {
+        several = false;
         rgb.setColor(0, 255, 0);
         digitalWrite(ledPin, HIGH);
         say(print, "[MOTORS] All 8 servos answer - checking them once more");
@@ -412,11 +425,17 @@ bool motorSetupRun(Dynamixel2Arduino& dxl, RGBManager& rgb, uint8_t ledPin,
         if (!warnedSeveral) {
           warnedSeveral = true;
           say(print, "[MOTORS] More than one new servo is plugged in - they'd all get the same ID. "
-              "Switch the robot off and leave only slot %u's new servo in.", next + 1);
+              "Switch the robot off and leave only slot %u's new servo in (the light blinks red until then).",
+              next + 1);
         }
-        flash(rgb, ledPin, 255, 0, 0, 300);
-        shown = -1;
+        if (!several) shown = -1;
+        several = true;
         continue;
+      }
+      if (several) {            // down to one or none: back to the count, from its start
+        several = false;
+        shown = -1;
+        patternStart = now;
       }
       if (newServos == ONE_NEW_SERVO) {
         warnedSeveral = false;
@@ -445,7 +464,8 @@ bool motorSetupRun(Dynamixel2Arduino& dxl, RGBManager& rgb, uint8_t ledPin,
       say(print, "[MOTORS] Waiting for a new servo in slot %u (%s leg)...", next + 1, LEG[next]);
       if (silent) print(NO_POWER_HINT);
     }
-    showBlinks(rgb, ledPin, next + 1, now - patternStart, shown);
+    if (several) showRed(rgb, ledPin, now, shown);
+    else showBlinks(rgb, ledPin, next + 1, now - patternStart, shown);
     delay(10);
   }
 }
