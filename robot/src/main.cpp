@@ -662,6 +662,10 @@ void serialOutputTask(void* parameter) {
         toggleRail(rail6V, "6V");
       } else if (c == 's') {
         sensorsPrintRequested = true;   // see sensorTask
+      } else if (c == 'm') {
+        q8.lockBus();                        // the scan has the bus to itself
+        motorSetupScan(q8dxl, printLineNow);
+        q8.unlockBus();
       } else if (c == 'F') {
         factoryResetAskedAt = millis();
         queuePrint(MSG_INFO, "[MOTORS] Type Y within 5 s to reset all 8 servos to factory settings - "
@@ -674,11 +678,13 @@ void serialOutputTask(void* parameter) {
         q8.toggleTorque(0);
         q8.resetTorqueState();
         q8.lockBus();
-        motorFactoryResetAll(q8dxl, printLineNow);
-        Serial.println("[MOTORS] Restarting into motor setup");
-        Serial.flush();
-        delay(200);
-        ESP.restart();
+        if (motorFactoryResetAll(q8dxl, printLineNow)) {
+          Serial.println("[MOTORS] Restarting - the robot stays stopped until it's switched fully off");
+          Serial.flush();
+          delay(200);
+          ESP.restart();
+        }
+        q8.unlockBus();   // nothing was reset - carry on
       }
     }
 
@@ -877,9 +883,13 @@ void setup() {
   // setup(), so the servos have had a few seconds to boot.
   // A slot without its servo means a robot being built or repaired: stay in
   // motor setup until every slot is filled (or 'q' skips it), then carry on.
+  // Straight after F, Y: stay stopped until a power cycle (see motorSetupHalt).
+  if (motorSetupResetPending()) {
+    motorSetupHalt(rgb, LED_PIN, rail6V, FIRMWARE_ID, printLineNow);
+  }
   MotorReport motors = motorSetupCheck(q8dxl, printLineNow);
   if (motors.wrongSettings) motorSetupFix(q8dxl, motors, printLineNow);
-  if (motors.found < MOTOR_COUNT) {
+  if (motors.found < MOTOR_COUNT || motors.unreliable) {
     motorSetupRun(q8dxl, rgb, LED_PIN, FIRMWARE_ID, printLineNow);
   }
   sensorsBegin(printLineNow);

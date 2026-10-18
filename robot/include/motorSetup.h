@@ -18,12 +18,15 @@ enum MotorStatus : uint8_t {
   MOTOR_OK,               // answers as its ID, settings as they should be
   MOTOR_MISSING,          // nothing answers as its ID at 1 Mbps
   MOTOR_WRONG_SETTINGS,   // answers, but an EEPROM setting differs (or can't be read)
+  MOTOR_UNRELIABLE,       // answers, but reads come back garbled or missing - two servos
+                          // sharing the ID, or a loose cable
 };
 
 struct MotorReport {
   MotorStatus status[MOTOR_COUNT];
   uint8_t found;            // slots whose servo answered at 1 Mbps
   uint8_t wrongSettings;    // of those, how many have a setting that differs
+  uint8_t unreliable;       // of those, how many answer unreliably
   bool factoryMotorPresent; // something answers as ID 1 at 57600 - a new servo
 };
 
@@ -43,12 +46,32 @@ uint8_t motorSetupFix(Dynamixel2Arduino& dxl, MotorReport& report, MotorPrintFn 
 
 // Serial F, then Y: put every servo that answers as one of the robot's IDs
 // (11-18, at 1 Mbps) back to its factory settings - ID 1, 57600 baud, every
-// setting at its default. Returns how many were reset. Afterwards they all
-// answer as ID 1, so setting them up again means plugging them in one at a
-// time - motorSetupRun() won't set up two at once.
+// setting at its default. Returns how many were reset. If any were, it also
+// marks the robot to stay stopped (motorSetupHalt) until it's switched fully
+// off - the caller then restarts - so motor setup can't set a servo up again
+// before there's been a chance to unplug it.
 uint8_t motorFactoryResetAll(Dynamixel2Arduino& dxl, MotorPrintFn print);
 
+// Whether a servo reset is waiting for a power cycle. The mark is kept in
+// RTC memory, which keeps its contents through a restart (software, or the
+// USB reset a firmware flash ends with) but comes up random from power-off.
+bool motorSetupResetPending();
+
+// Serial m: how reliably each servo ID answers, at 1 Mbps (IDs 11-18) and at
+// 57600 (a new servo, ID 1) - pings and position reads, and whether the
+// failures are garbled replies (two servos on one ID) or missing ones (a
+// loose cable, a noisy bus). For diagnosing; changes nothing.
+void motorSetupScan(Dynamixel2Arduino& dxl, MotorPrintFn print);
+
 class RGBManager;
+class PowerRail;
+
+// The stopped state after a servo reset. Never returns: servo power off (so
+// servos are safe to unplug), status light solid red, and instructions on
+// the serial monitor every 30 s; 'i' still prints firmwareId. Only a power
+// cycle - switched off, USB unplugged too - ends it.
+[[noreturn]] void motorSetupHalt(RGBManager& rgb, uint8_t ledPin, PowerRail& servoPower,
+                                 const char* firmwareId, MotorPrintFn print);
 
 // Motor setup mode, for when motorSetupCheck() finds slots without their
 // servo. For "plug a new servo into slot N" (the lowest empty slot) the
