@@ -945,7 +945,8 @@ void setup() {
   BaseType_t taskCreated = xTaskCreate(
     serialOutputTask,   // Task function
     "SerialOutput",     // Task name
-    2048,               // Stack size (bytes)
+    6144,               // Stack size (bytes) - the servo bus scan (m) and reset (F, Y) run here
+                        // and need far more than printing does: 2048 overflowed on m
     NULL,               // Parameters
     1,                  // Priority (low)
     NULL                // Task handle
