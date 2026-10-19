@@ -74,6 +74,9 @@ namespace {
     return bad;
   }
 
+  // Names the bits of a Hardware Error Status value (defined with the scan, below).
+  void describeErrors(uint8_t bits, char* out, size_t len);
+
   bool garbled(DXLLibErrorCode_t err) {
     return err == DXL_LIB_ERROR_CRC || err == DXL_LIB_ERROR_CHECK_SUM || err == DXL_LIB_ERROR_WRONG_PACKET;
   }
@@ -296,7 +299,18 @@ MotorReport motorSetupCheck(Dynamixel2Arduino& dxl, MotorPrintFn print) {
     } else if (drive == WANT_DRIVE_MODE[i] && op == WANT_OPERATING_MODE
                && home == WANT_HOMING_OFFSET[i]) {
       report.status[i] = MOTOR_OK;
-      snprintf(line + n, sizeof(line) - n, "ok");
+      // A hardware error survives a restart of the board if the servo kept
+      // its power - worth saying, though it doesn't stop setup or boot.
+      int32_t hwErr = 0;
+      readItem(dxl, HARDWARE_ERROR_STATUS, id, hwErr, QUICK_READ_MS);
+      if (hwErr) {
+        char errors[96];
+        describeErrors((uint8_t)hwErr, errors, sizeof(errors));
+        snprintf(line + n, sizeof(line) - n, "ok, but it reports a HARDWARE ERROR: %s "
+                 "(its torque stays off until it restarts - switch the robot off and on)", errors);
+      } else {
+        snprintf(line + n, sizeof(line) - n, "ok");
+      }
     } else {
       report.status[i] = MOTOR_WRONG_SETTINGS;
       report.wrongSettings++;
@@ -465,6 +479,52 @@ namespace {
     say(print, "[MOTORS]   %s, ID %u: pings %u/%u, reads %u ok / %u garbled / %u no reply - %s",
         what, id, pinged, TRIES, clean, mangled, lost, verdict);
   }
+
+  // Hardware Error Status (70) bits on the XL330-M077 (its e-manual). A
+  // servo keeps them - with its torque switched off, for the kinds its
+  // Shutdown setting (63) lists - until it restarts.
+  void describeErrors(uint8_t bits, char* out, size_t len) {
+    static const struct { uint8_t bit; const char* name; } KINDS[] = {
+      {0, "input voltage"}, {2, "overheating"}, {4, "electrical shock"}, {5, "overload"},
+    };
+    int n = 0;
+    out[0] = 0;
+    for (const auto& kind : KINDS) {
+      if (bits & (1u << kind.bit)) {
+        n += snprintf(out + n, len - n, "%s%s", n ? ", " : "", kind.name);
+        bits &= ~(1u << kind.bit);
+      }
+    }
+    for (uint8_t b = 0; b < 8 && n < (int)len; b++) {          // anything this list doesn't know
+      if (bits & (1u << b)) n += snprintf(out + n, len - n, "%sbit %u", n ? ", " : "", b);
+    }
+  }
+
+  const int32_t DEFAULT_SHUTDOWN = 53;   // every kind above shuts the servo down
+
+  // One line of the scan's status section; true if the servo reports a hardware error.
+  bool statusLine(Dynamixel2Arduino& dxl, uint8_t id, const char* what, MotorPrintFn print) {
+    int32_t err, volts, temp, torque, firmware, shutdown;
+    if (!(readItem(dxl, HARDWARE_ERROR_STATUS, id, err, QUICK_READ_MS)
+          && readItem(dxl, PRESENT_INPUT_VOLTAGE, id, volts, QUICK_READ_MS)
+          && readItem(dxl, PRESENT_TEMPERATURE, id, temp, QUICK_READ_MS)
+          && readItem(dxl, TORQUE_ENABLE, id, torque, QUICK_READ_MS)
+          && readItem(dxl, FIRMWARE_VERSION, id, firmware, QUICK_READ_MS)
+          && readItem(dxl, SHUTDOWN, id, shutdown, QUICK_READ_MS))) {
+      say(print, "[MOTORS]   %s, ID %u: its status couldn't be read", what, id);
+      return false;
+    }
+    char errors[96];
+    describeErrors((uint8_t)err, errors, sizeof(errors));
+    char extra[48] = "";
+    if (shutdown != DEFAULT_SHUTDOWN) {
+      snprintf(extra, sizeof(extra), " | shutdown setting %ld (default %ld)", (long)shutdown, (long)DEFAULT_SHUTDOWN);
+    }
+    say(print, "[MOTORS]   %s, ID %u: %s%s | %ld.%ld V, %ld C | torque %s | firmware %ld%s",
+        what, id, err ? "HARDWARE ERROR: " : "no hardware errors", err ? errors : "",
+        (long)(volts / 10), (long)(volts % 10), (long)temp, torque ? "on" : "off", (long)firmware, extra);
+    return err != 0;
+  }
 }
 
 void motorSetupScan(Dynamixel2Arduino& dxl, MotorPrintFn print) {
@@ -479,7 +539,28 @@ void motorSetupScan(Dynamixel2Arduino& dxl, MotorPrintFn print) {
   useBaud(dxl, FACTORY_BAUD);
   say(print, "[MOTORS] At 57600 baud (new servos):");
   scanId(dxl, FACTORY_ID, "new servo", print);
+
+  // What each servo that answers says about itself.
+  say(print, "[MOTORS] Status of each servo that answers - hardware errors, supply, temperature:");
+  bool anyErrors = false, anyAnswered = false;
   useBaud(dxl, ROBOT_BAUD);
+  for (uint8_t i = 0; i < MOTOR_COUNT; i++) {
+    if (!answers(dxl, MOTOR_FIRST_ID + i)) continue;
+    snprintf(what, sizeof(what), "slot %u (%s)", i + 1, LEG[i]);
+    anyErrors |= statusLine(dxl, MOTOR_FIRST_ID + i, what, print);
+    anyAnswered = true;
+  }
+  useBaud(dxl, FACTORY_BAUD);
+  if (answers(dxl, FACTORY_ID)) {
+    anyErrors |= statusLine(dxl, FACTORY_ID, "new servo", print);
+    anyAnswered = true;
+  }
+  useBaud(dxl, ROBOT_BAUD);
+  if (!anyAnswered) say(print, "[MOTORS]   no servo answers");
+  if (anyErrors) {
+    say(print, "[MOTORS] A servo keeps a hardware error - and its torque off - until it restarts: "
+        "switch the robot off and on.");
+  }
 }
 
 bool motorSetupRun(Dynamixel2Arduino& dxl, RGBManager& rgb, uint8_t ledPin,
