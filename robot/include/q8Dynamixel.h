@@ -126,6 +126,9 @@ class q8Dynamixel
     // Plays a frame table at a constant per-frame delay. Used by trotDemo().
     void _playFrames(const float frames[][8], uint8_t frameCount, uint8_t reps, uint16_t delayMs);
     void expandArrays();
+    // Make every servo's goal its present position, so torque coming on
+    // moves nothing. False if they didn't all answer.
+    bool holdPresentPose();
     const float _idlePos[2]   = {30, 150};
     int32_t _idleArray[8];
     const float _jumpLow[2]   = {-90, 270};

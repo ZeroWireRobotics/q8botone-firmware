@@ -690,7 +690,7 @@ void rgbStatusTask(void* parameter) {
 // controller waits these out, taken from the delay() calls in the robot
 // firmware's q8Dynamixel::jump()/greet() (keep them in step). Presses
 // meanwhile are dropped rather than queueing up on the robot.
-const uint32_t ROBOT_JUMP_MS = 4400;
+const uint32_t ROBOT_JUMP_MS = 3400;   // crouch 1.1 s, push 0.2 s, limp 1 s, back on and to idle 1.1 s
 const uint32_t ROBOT_GREET_MS = 6450;
 // Then back to the current gait's stance: the robot's own greet ends
 // folded and its jump on a fixed rest pose. Same as the desktop app's

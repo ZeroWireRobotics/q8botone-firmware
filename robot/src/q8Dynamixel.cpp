@@ -300,15 +300,43 @@ void q8Dynamixel::jump(){
   delay(100);
   bulkWrite(_highArray);
   delay(100);
-  bulkWrite(_restArray);
-  delay(2000);
 
-  // Back to idle
+  // Limp for the flight and landing instead of driving the legs back -
+  // that would be a second current spike, and the push's alone can sag the
+  // servo supply enough to restart a servo or two, which then come back
+  // with torque off. Turning all eight off, then all back on below, puts
+  // every servo - restarted or not - in the same state again.
+  disableTorque();
+  delay(1000);
+
+  // Back on, first holding wherever each leg landed: a servo that didn't
+  // restart still has the push's full extension as its goal. setProfile()
+  // also restores the gain and profile a restarted servo lost.
+  bool held = false;
+  for (int attempt = 0; attempt < 3 && !held; attempt++){
+    held = holdPresentPose();
+    if (!held) delay(50);
+  }
+  if (!held) Serial.println("[ROBOT] Jump: couldn't read every leg's position - easing to idle anyway");
   setProfile(500);
+  enableTorque();
+
+  // Then ease into the idle pose.
   delay(100);
   bulkWrite(_idleArray);
   delay(1000);
   _prevProfile = 500;
+}
+
+bool q8Dynamixel::holdPresentPose(){
+  BusGuard guard(*this);
+  if (_dxl.fastSyncRead(&_sr_infos) != _idCount) return false;
+  int32_t present[_idCount];
+  for (uint8_t i = 0; i < _idCount; i++){
+    present[i] = _sr_data[i].present_position;
+  }
+  bulkWrite(present);
+  return true;
 }
 
 void q8Dynamixel::greet(){
