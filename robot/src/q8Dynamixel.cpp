@@ -115,6 +115,7 @@ void q8Dynamixel::begin(){
 
   setProfile(1000);
   expandArrays();
+  learnTurns();
 }
 
 bool q8Dynamixel::readJointState(TelemetryPayload& out){
@@ -122,8 +123,13 @@ bool q8Dynamixel::readJointState(TelemetryPayload& out){
 
   if (_dxl.fastSyncRead(&_sr_infos) != _idCount) return false;
 
+  // While limp, keep the turns current from these same readings - the
+  // servos may have been power-cycled with the board still running (switched
+  // off and on with USB plugged in). With torque on they were set at the
+  // last torque-on.
+  if (!_torqueFlag) adoptTurns();
   for (uint8_t i = 0; i < _idCount; i++){
-    out.position[i] = _sr_data[i].present_position;
+    out.position[i] = _sr_data[i].present_position - _turnTicks[i];
     out.current[i]  = _sr_data[i].present_current;
   }
   return true;
@@ -156,6 +162,15 @@ uint16_t q8Dynamixel::checkBattery(){
 
 void q8Dynamixel::enableTorque(){
   BusGuard guard(*this);
+  // First re-learn which turn each servo counts itself in and make its goal
+  // where it is now, so torque coming on moves nothing - not even a servo
+  // that restarted, or came up a turn away, since the goals were last sent.
+  bool held = false;
+  for (int attempt = 0; attempt < 3 && !held; attempt++){
+    held = holdPresentPose();
+    if (!held) delay(50);
+  }
+  if (!held) Serial.println("[ROBOT] Torque on: couldn't read every joint's position first");
   _dxl.torqueOn(BROADCAST_ID);
 }
 
@@ -230,21 +245,24 @@ void q8Dynamixel::setGain(uint16_t p_gain){
 }
 
 void q8Dynamixel::moveSingle(int32_t val){
-  BusGuard guard(*this);
   // 8 motors move to the same position
-  for (int i = 0; i < _idCount; i++){
-    _bw_data_xel[i].goal_position = val;
-  }
-  _bw_infos.is_info_changed = true;
-
-  _dxl.bulkWrite(&_bw_infos);
+  int32_t values[_idCount];
+  for (int i = 0; i < _idCount; i++) values[i] = val;
+  bulkWrite(values);
 }
 
 void q8Dynamixel::bulkWrite(int32_t values[8]){
+  // 8 motors move to their respective positions, each in the turn it
+  // counts itself in (see _turnTicks)
+  int32_t raw[_idCount];
+  for (int i = 0; i < _idCount; i++) raw[i] = values[i] + _turnTicks[i];
+  writeGoalsRaw(raw);
+}
+
+void q8Dynamixel::writeGoalsRaw(const int32_t raw[8]){
   BusGuard guard(*this);
-  // 8 motors move to their respective positions
   for (int i = 0; i < _idCount; i++){
-    _bw_data_xel[i].goal_position = values[i];
+    _bw_data_xel[i].goal_position = raw[i];
   }
   _bw_infos.is_info_changed = true;
 
@@ -309,15 +327,10 @@ void q8Dynamixel::jump(){
   disableTorque();
   delay(1000);
 
-  // Back on, first holding wherever each leg landed: a servo that didn't
-  // restart still has the push's full extension as its goal. setProfile()
-  // also restores the gain and profile a restarted servo lost.
-  bool held = false;
-  for (int attempt = 0; attempt < 3 && !held; attempt++){
-    held = holdPresentPose();
-    if (!held) delay(50);
-  }
-  if (!held) Serial.println("[ROBOT] Jump: couldn't read every leg's position - easing to idle anyway");
+  // Back on. enableTorque() first holds wherever each leg landed - a servo
+  // that didn't restart still has the push's full extension as its goal -
+  // and re-learns the turns, in case a restarted one came up a turn away.
+  // setProfile() also restores the gain and profile a restarted servo lost.
   setProfile(500);
   enableTorque();
 
@@ -330,13 +343,37 @@ void q8Dynamixel::jump(){
 
 bool q8Dynamixel::holdPresentPose(){
   BusGuard guard(*this);
-  if (_dxl.fastSyncRead(&_sr_infos) != _idCount) return false;
+  if (!learnTurns()) return false;
   int32_t present[_idCount];
   for (uint8_t i = 0; i < _idCount; i++){
     present[i] = _sr_data[i].present_position;
   }
-  bulkWrite(present);
+  writeGoalsRaw(present);
   return true;
+}
+
+bool q8Dynamixel::learnTurns(){
+  BusGuard guard(*this);
+  if (_dxl.fastSyncRead(&_sr_infos) != _idCount) return false;
+  adoptTurns();
+  return true;
+}
+
+void q8Dynamixel::adoptTurns(){
+  for (uint8_t i = 0; i < _idCount; i++){
+    const int32_t low = _deg2Dxl(_idlePos[i % 2]) - TICKS_PER_TURN / 2;
+    const int32_t d = _sr_data[i].present_position - low;
+    const int32_t turns = d >= 0 ? d / TICKS_PER_TURN : -((-d + TICKS_PER_TURN - 1) / TICKS_PER_TURN);
+    if (turns * TICKS_PER_TURN != _turnTicks[i]){
+      _turnTicks[i] = turns * TICKS_PER_TURN;
+      if (turns){
+        Serial.printf("[ROBOT] Slot %u counts itself %ld turn%s off - allowing for it\n",
+                      i + 1, (long)(turns < 0 ? -turns : turns), (turns == 1 || turns == -1) ? "" : "s");
+      } else {
+        Serial.printf("[ROBOT] Slot %u counts itself in its own turn again\n", i + 1);
+      }
+    }
+  }
 }
 
 void q8Dynamixel::greet(){

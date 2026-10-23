@@ -127,8 +127,30 @@ class q8Dynamixel
     void _playFrames(const float frames[][8], uint8_t frameCount, uint8_t reps, uint16_t delayMs);
     void expandArrays();
     // Make every servo's goal its present position, so torque coming on
-    // moves nothing. False if they didn't all answer.
+    // moves nothing - re-learning the turns first. False if they didn't all
+    // answer.
     bool holdPresentPose();
+
+    // Which turn each servo counts itself in, in ticks (a whole number of
+    // turns). After a power-up a servo rebuilds its multi-turn count from
+    // its single-turn encoder, and a reversed one (the right legs) can come
+    // up whole turns away from the turn its joint's angles are written for -
+    // how many depends on the servo's own firmware and even on how it was
+    // last restarted, so it can't be fixed reliably in its homing offset.
+    // Instead every goal written gets this added and every position read
+    // has it taken off, so the rest of the firmware - and the host - always
+    // see each joint in its own turn.
+    static const int32_t TICKS_PER_TURN = 4096;
+    int32_t _turnTicks[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+    // Set _turnTicks from positions already in _sr_data: whole turns outside
+    // half a turn either side of the joint's idle angle - a leg can't go a
+    // full turn, and that window still holds the jump's crouch and full
+    // extension. Says which joints changed.
+    void adoptTurns();
+    // Read every servo's position and adoptTurns(). False if they didn't all answer.
+    bool learnTurns();
+    // The goal-position write itself, in the servos' own (raw) ticks.
+    void writeGoalsRaw(const int32_t raw[8]);
     const float _idlePos[2]   = {30, 150};
     int32_t _idleArray[8];
     const float _jumpLow[2]   = {-90, 270};

@@ -91,13 +91,46 @@ namespace {
   const uint8_t BAUD_1M_CODE = 3;        // BAUD_RATE item value for 1 Mbps
   const uint32_t EEPROM_SETTLE_MS = 50;  // after the ID and baud writes, as the old tool did
 
-  // Do slot i's servo's EEPROM settings read back as they should?
+  // Which turn a servo counts itself in. Only the homing offset modulo a
+  // turn sets where a joint's zero is; whole turns only decide which turn
+  // it's counted in, and for a reversed servo (the right legs) that comes
+  // out differently with servo firmware version and even with how it was
+  // last restarted - so it isn't fixed in EEPROM: q8Dynamixel allows for it
+  // (_turnTicks). The homing offset is right if it's a whole number of turns
+  // from the table value; the boot check just reports a joint reading
+  // outside half a turn of its idle angle (q8Dynamixel's _idlePos: 30 / 150
+  // deg) - a leg can't physically go a full turn, and the window still holds
+  // the jump's crouch (-90 / 270 deg) and full extension (90 / 90 deg).
+  const int32_t TICKS_PER_TURN = 4096;
+  const int32_t ZERO_TICKS = 4096;                         // 0 deg, q8Dynamixel's _zeroOffset
+  const int32_t IDLE_TICKS[2] = {ZERO_TICKS + 30 * TICKS_PER_TURN / 360,
+                                 ZERO_TICKS + 150 * TICKS_PER_TURN / 360};   // first, second servo of a leg
+
+  bool homingMatches(int32_t home, uint8_t i) {
+    return (home - WANT_HOMING_OFFSET[i]) % TICKS_PER_TURN == 0;
+  }
+
+  // Whole turns a reading lies outside slot i's window - 0 when it's inside.
+  int32_t turnsOff(int32_t present, uint8_t i) {
+    const int32_t d = present - (IDLE_TICKS[i % 2] - TICKS_PER_TURN / 2);
+    return d >= 0 ? d / TICKS_PER_TURN : -((-d + TICKS_PER_TURN - 1) / TICKS_PER_TURN);
+  }
+
+  // A position in degrees, to one decimal, for messages.
+  void degreesText(int32_t ticks, char* out, size_t len) {
+    const long tenths = (long)(((int64_t)ticks - ZERO_TICKS) * 3600 / TICKS_PER_TURN);
+    snprintf(out, len, "%s%ld.%ld", tenths < 0 ? "-" : "", labs(tenths) / 10, labs(tenths) % 10);
+  }
+
+  // Do slot i's servo's EEPROM settings read back as they should? (The turn
+  // it counts in is checked at boot, not here - a new servo being set up has
+  // no leg yet, so its shaft can be anywhere.)
   bool settingsMatch(Dynamixel2Arduino& dxl, uint8_t i) {
     const uint8_t id = MOTOR_FIRST_ID + i;
     int32_t drive, op, home;
     return readItem(dxl, DRIVE_MODE, id, drive) && readItem(dxl, OPERATING_MODE, id, op)
         && readItem(dxl, HOMING_OFFSET, id, home)
-        && drive == WANT_DRIVE_MODE[i] && op == WANT_OPERATING_MODE && home == WANT_HOMING_OFFSET[i];
+        && drive == WANT_DRIVE_MODE[i] && op == WANT_OPERATING_MODE && homingMatches(home, i);
   }
 
   void say(MotorPrintFn print, const char* fmt, ...) {
@@ -286,18 +319,19 @@ MotorReport motorSetupCheck(Dynamixel2Arduino& dxl, MotorPrintFn print) {
       continue;
     }
 
-    int32_t drive, op, home;
+    int32_t drive, op, home, present;
     bool read = readItem(dxl, DRIVE_MODE, id, drive)
              && readItem(dxl, OPERATING_MODE, id, op)
-             && readItem(dxl, HOMING_OFFSET, id, home);
+             && readItem(dxl, HOMING_OFFSET, id, home)
+             && readItem(dxl, PRESENT_POSITION, id, present);
     const uint16_t model = dxl.getModelNumber(id);
+    const int32_t turns = read ? turnsOff(present, i) : 0;
 
     if (!read) {
       report.status[i] = MOTOR_WRONG_SETTINGS;
       report.wrongSettings++;
       snprintf(line + n, sizeof(line) - n, "found, but its settings couldn't be read");
-    } else if (drive == WANT_DRIVE_MODE[i] && op == WANT_OPERATING_MODE
-               && home == WANT_HOMING_OFFSET[i]) {
+    } else if (drive == WANT_DRIVE_MODE[i] && op == WANT_OPERATING_MODE && homingMatches(home, i)) {
       report.status[i] = MOTOR_OK;
       // A hardware error survives a restart of the board if the servo kept
       // its power - worth saying, though it doesn't stop setup or boot.
@@ -306,10 +340,16 @@ MotorReport motorSetupCheck(Dynamixel2Arduino& dxl, MotorPrintFn print) {
       if (hwErr) {
         char errors[96];
         describeErrors((uint8_t)hwErr, errors, sizeof(errors));
-        snprintf(line + n, sizeof(line) - n, "ok, but it reports a HARDWARE ERROR: %s "
-                 "(its torque stays off until it restarts - switch the robot off and on)", errors);
+        n += snprintf(line + n, sizeof(line) - n, "ok, but it reports a HARDWARE ERROR: %s "
+                      "(its torque stays off until it restarts - switch the robot off and on)", errors);
       } else {
-        snprintf(line + n, sizeof(line) - n, "ok");
+        n += snprintf(line + n, sizeof(line) - n, "ok");
+      }
+      if (turns) {
+        char deg[16];
+        degreesText(present, deg, sizeof(deg));
+        snprintf(line + n, sizeof(line) - n, " (it reads %s deg, counting itself %ld turn%s off - "
+                 "the firmware allows for that)", deg, labs((long)turns), labs((long)turns) == 1 ? "" : "s");
       }
     } else {
       report.status[i] = MOTOR_WRONG_SETTINGS;
@@ -321,8 +361,9 @@ MotorReport motorSetupCheck(Dynamixel2Arduino& dxl, MotorPrintFn print) {
       if (op != WANT_OPERATING_MODE) {
         n += snprintf(line + n, sizeof(line) - n, " operating mode %ld (should be %u)", (long)op, WANT_OPERATING_MODE);
       }
-      if (home != WANT_HOMING_OFFSET[i]) {
-        snprintf(line + n, sizeof(line) - n, " homing offset %ld (should be %ld)", (long)home, (long)WANT_HOMING_OFFSET[i]);
+      if (!homingMatches(home, i)) {
+        snprintf(line + n, sizeof(line) - n, " homing offset %ld (should be %ld, give or take whole turns)",
+                 (long)home, (long)WANT_HOMING_OFFSET[i]);
       }
     }
     print(line);
@@ -390,13 +431,20 @@ uint8_t motorSetupFix(Dynamixel2Arduino& dxl, MotorReport& report, MotorPrintFn 
       ok = dxl.writeControlTableItem(OPERATING_MODE, id, WANT_OPERATING_MODE);
       say(print, "[MOTORS] Slot %u, internal ID %u: operating mode %ld -> %u", i + 1, id, (long)op, WANT_OPERATING_MODE);
     }
-    if (ok && home != WANT_HOMING_OFFSET[i]) {
+    if (ok && !homingMatches(home, i)) {
       ok = dxl.writeControlTableItem(HOMING_OFFSET, id, WANT_HOMING_OFFSET[i]);
       say(print, "[MOTORS] Slot %u, internal ID %u: homing offset %ld -> %ld", i + 1, id, (long)home, (long)WANT_HOMING_OFFSET[i]);
     }
-    delay(EEPROM_SETTLE_MS);
+    // (Which turn it counts itself in isn't fixed here: q8Dynamixel allows
+    // for it - see _turnTicks.) A servo takes a moment to apply what was
+    // just written to its EEPROM, so check again for up to half a second.
+    bool fixed = false;
+    for (uint8_t attempt = 0; ok && !fixed && attempt < 10; attempt++) {
+      delay(EEPROM_SETTLE_MS);
+      fixed = settingsMatch(dxl, i);
+    }
 
-    if (ok && settingsMatch(dxl, i)) {
+    if (fixed) {
       report.status[i] = MOTOR_OK;
       report.wrongSettings--;
       say(print, "[MOTORS] Slot %u (%s leg), internal ID %u: settings corrected", i + 1, LEG[i], id);
