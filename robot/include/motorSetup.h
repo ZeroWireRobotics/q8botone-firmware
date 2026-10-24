@@ -87,11 +87,14 @@ class PowerRail;
 // nothing but red, fast and steady, and the serial monitor asks for all but
 // one to be unplugged.
 //
-// Serial: 'q' skips setup and returns (boot carries on without the missing
-// servos); 'i' prints firmwareId, so the desktop app can still tell this
-// board is a robot; 'F' then 'Y' resets the servos to factory settings, as
-// in normal running. Returns true if all 8 servos ended up set up.
+// Holding the button (buttonPin, active low, already set up as an input) for
+// 3 s skips setup, as does 'q' over serial: the light turns solid green, and
+// once the button is let go boot carries on without the missing servos -
+// for trying out a board's sensors or radio without all eight. Other serial
+// keys: 'i' prints firmwareId, so the desktop app can still tell this board
+// is a robot; 'F' then 'Y' resets the servos to factory settings, as in
+// normal running. Returns true if all 8 servos ended up set up.
 //
 // Blocks - call from setup(), before the tasks that use the bus exist.
-bool motorSetupRun(Dynamixel2Arduino& dxl, RGBManager& rgb, uint8_t ledPin,
+bool motorSetupRun(Dynamixel2Arduino& dxl, RGBManager& rgb, uint8_t ledPin, uint8_t buttonPin,
                    const char* firmwareId, MotorPrintFn print);

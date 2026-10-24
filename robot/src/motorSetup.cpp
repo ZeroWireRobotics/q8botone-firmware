@@ -88,6 +88,7 @@ namespace {
   const uint32_t BLINK_PERIOD_MS = 330;  // one blink: on, then off for the rest
   const uint32_t BLINK_GAP_MS = 1000;    // pause between counts
   const uint32_t COOLDOWN_MS = 2000;     // all 8 in: settle, then check once more
+  const uint32_t SKIP_HOLD_MS = 3000;    // button held this long: skip setup (as the pairing long-press)
   const uint8_t BAUD_1M_CODE = 3;        // BAUD_RATE item value for 1 Mbps
   const uint32_t EEPROM_SETTLE_MS = 50;  // after the ID and baud writes, as the old tool did
 
@@ -219,16 +220,20 @@ namespace {
 
   // The setup light runs on a task of its own, a step above the setup loop,
   // so the bus checks - a few hundred ms when servos are missing - can never
-  // stretch or cut short a blink. The loop only says what to show.
+  // stretch or cut short a blink. The loop only says what to show. The
+  // button is timed there too, for the same reason: held SKIP_HOLD_MS, the
+  // light turns solid green and the loop leaves setup (see motorSetupRun).
   enum LightMode : uint8_t { LIGHT_COUNT, LIGHT_RED, LIGHT_GREEN };
 
   struct SetupLight {
     RGBManager* rgb;
     uint8_t pin;
+    uint8_t buttonPin;            // active low
     volatile LightMode mode;
     volatile uint8_t count;       // LIGHT_COUNT: waiting for slot `count`
     volatile uint32_t start;      // when that count pattern started
     volatile uint32_t redUntil;   // one red flash (a failed step) until then
+    volatile bool skipHeld;       // the button was held SKIP_HOLD_MS
     volatile bool quit;
     volatile bool stopped;
   };
@@ -254,10 +259,20 @@ namespace {
   void setupLightTask(void* arg) {
     SetupLight& light = *static_cast<SetupLight*>(arg);
     int8_t shown = -1;
+    uint32_t pressedSince = 0;      // 0 = not pressed
     while (!light.quit) {
       const uint32_t now = millis();
+      if (digitalRead(light.buttonPin) != LOW) {
+        pressedSince = 0;           // any release starts the hold over
+      } else if (!pressedSince) {
+        pressedSince = now ? now : 1;
+      } else if (now - pressedSince >= SKIP_HOLD_MS) {
+        light.skipHeld = true;
+      }
       int8_t state;
-      if ((int32_t)(light.redUntil - now) > 0) {
+      if (light.skipHeld) {
+        state = 1;                  // solid green: let go, starting
+      } else if ((int32_t)(light.redUntil - now) > 0) {
         state = 3;
       } else if (light.mode == LIGHT_RED) {
         state = redState(now);
@@ -611,19 +626,20 @@ void motorSetupScan(Dynamixel2Arduino& dxl, MotorPrintFn print) {
   }
 }
 
-bool motorSetupRun(Dynamixel2Arduino& dxl, RGBManager& rgb, uint8_t ledPin,
+bool motorSetupRun(Dynamixel2Arduino& dxl, RGBManager& rgb, uint8_t ledPin, uint8_t buttonPin,
                    const char* firmwareId, MotorPrintFn print) {
   say(print, "[MOTORS] ---- Motor setup ----");
   say(print, "[MOTORS] The light blinks green once for each slot before the one it wants, then yellow:");
   say(print, "[MOTORS] green, green, yellow = plug a new servo into slot 3.");
   say(print, "[MOTORS] Switch the robot off before plugging a servo in, and add one new servo at a time.");
-  say(print, "[MOTORS] Type q to skip setup and start anyway.");
+  say(print, "[MOTORS] Type q, or hold the button for %lu s, to skip setup and start anyway.",
+      (unsigned long)(SKIP_HOLD_MS / 1000));
 
   int8_t announced = -1;   // slot last announced as "next"
   uint8_t next = 0;
   uint32_t lastPoll = 0, lastReminder = millis();
 
-  SetupLight light = {&rgb, ledPin, LIGHT_COUNT, 1, millis(), 0, false, false};
+  SetupLight light = {&rgb, ledPin, buttonPin, LIGHT_COUNT, 1, millis(), 0, false, false, false};
   xTaskCreate(setupLightTask, "SetupLight", 2048, &light, 2, nullptr);
   uint32_t resetAskedAt = 0;      // when F was typed, 0 if it wasn't
   bool warnedSeveral = false;     // "more than one new servo" said since the last change
@@ -632,6 +648,20 @@ bool motorSetupRun(Dynamixel2Arduino& dxl, RGBManager& rgb, uint8_t ledPin,
   bool silent = false;            // nothing answered on the last look (see NO_POWER_HINT)
 
   while (true) {
+    // Checked between bus checks, so a servo being set up is never left
+    // half done.
+    if (light.skipHeld) {
+      say(print, "[MOTORS] Button held - let go to start");
+      // Only once it's let go: normal running would count the same press
+      // towards its own long-press (forcing pairing mode).
+      while (digitalRead(buttonPin) == LOW) delay(10);
+      delay(50);
+      stopLight(light);
+      useBaud(dxl, ROBOT_BAUD);
+      say(print, "[MOTORS] Setup skipped - starting without every servo");
+      return false;
+    }
+
     while (Serial.available()) {
       const char c = Serial.read();
       if (c == 'q') {

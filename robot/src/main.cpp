@@ -882,7 +882,8 @@ void setup() {
   // the I2C bus just below. The 6V rail has been on since the top of
   // setup(), so the servos have had a few seconds to boot.
   // A slot without its servo means a robot being built or repaired: stay in
-  // motor setup until every slot is filled (or 'q' skips it), then carry on.
+  // motor setup until every slot is filled (or 'q', or holding the button
+  // 3 s, skips it), then carry on.
   // Straight after F, Y: stay stopped until a power cycle (see motorSetupHalt).
   if (motorSetupResetPending()) {
     motorSetupHalt(rgb, LED_PIN, rail6V, FIRMWARE_ID, printLineNow);
@@ -890,7 +891,7 @@ void setup() {
   MotorReport motors = motorSetupCheck(q8dxl, printLineNow);
   if (motors.wrongSettings) motorSetupFix(q8dxl, motors, printLineNow);
   if (motors.found < MOTOR_COUNT || motors.unreliable) {
-    motorSetupRun(q8dxl, rgb, LED_PIN, FIRMWARE_ID, printLineNow);
+    motorSetupRun(q8dxl, rgb, LED_PIN, BUTTON_PIN, FIRMWARE_ID, printLineNow);
   }
   sensorsBegin(printLineNow);
 
