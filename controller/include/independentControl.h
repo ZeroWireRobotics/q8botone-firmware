@@ -61,8 +61,8 @@ extern const float INDEPENDENT_GAIT_NEUTRAL_X[5];
 extern const float INDEPENDENT_GAIT_NEUTRAL_Y[5];
 
 // Ports kinematics_solver.py's k_solver.ik_solve() verbatim (law-of-cosines,
-// closed-form) for this robot's leg geometry (CENTER_DIST=19.5, L1=L2P=25,
-// L2=L2P=40 - matches robot.py's k_solver(CENTER_DIST, L1, L2, L1, L2)).
+// closed-form) for this robot's leg geometry (CENTER_DIST=20, L1=L1P=24,
+// L2=L2P=39 - matches kinematics_solver.py's CENTER_DIST, L1, L2).
 // acos() arguments are clamped to [-1,1] to absorb float rounding at the
 // domain boundary - every (x,y) this is actually called with is one of the
 // gaits' own known-reachable baselines above, so a real out-of-range input

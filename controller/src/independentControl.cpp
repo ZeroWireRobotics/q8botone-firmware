@@ -69,11 +69,12 @@ const char* const INDEPENDENT_GAIT_NAMES[5] = {
 };
 
 // (x0, y0) per gait - see gait_manager.py's GAITS dict, same order as above.
-const float INDEPENDENT_GAIT_NEUTRAL_X[5] = {9.75f, 9.75f, 9.75f, 9.75f, 9.75f};
-const float INDEPENDENT_GAIT_NEUTRAL_Y[5] = {43.36f, 60.0f, 25.0f, 40.0f, 33.36f};
+const float INDEPENDENT_GAIT_NEUTRAL_X[5] = {10.0f, 10.0f, 10.0f, 10.0f, 10.0f};
+const float INDEPENDENT_GAIT_NEUTRAL_Y[5] = {43.36f, 58.0f, 25.0f, 40.0f, 33.36f};
 
 void ikSolveNeutral(float x, float y, float& q1Deg, float& q2Deg) {
-  const float d = 19.5f, l1 = 25.0f, l2 = 40.0f;
+  // The robot's leg, as kinematics_solver.py's CENTER_DIST, L1, L2 (its CAD)
+  const float d = 20.0f, l1 = 24.0f, l2 = 39.0f;
 
   float c1 = sqrtf((x - d) * (x - d) + y * y);
   float c2 = sqrtf(x * x + y * y);
