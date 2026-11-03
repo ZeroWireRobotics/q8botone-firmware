@@ -83,6 +83,14 @@ public:
   bool begin() {
     if (!_ina.begin(addr, &Wire)) return false;
     _ina.setShunt(SHUNT_OHMS, MAX_CURRENT_A);
+    // Each reading an average over ~90 ms rather than one ~1 ms conversion -
+    // the servos draw in pulses, so a single conversion is only a snapshot.
+    // 16 x (4120 us shunt + 1052 us bus + 540 us temperature) = 91 ms, most
+    // of it spent on the current.
+    _ina.setCurrentConversionTime(INA2XX_TIME_4120_us);
+    _ina.setVoltageConversionTime(INA2XX_TIME_1052_us);
+    _ina.setTemperatureConversionTime(INA2XX_TIME_540_us);
+    _ina.setAveragingCount(INA2XX_COUNT_16);
     return true;
   }
 

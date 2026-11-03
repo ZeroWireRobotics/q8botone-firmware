@@ -75,10 +75,11 @@ volatile bool sensorsPrintRequested = false;
 uint32_t factoryResetAskedAt = 0;
 void printLineNow(const char* line);   // defined below, with the sensor task
 
-// Temperature is cached rather than read per sample: it sits outside the
-// contiguous 126-135 block the main read covers, and moves over seconds. The
-// robot refreshes it on this period and every reply carries the last value,
-// so the host can ask as fast as it likes without touching a servo for it.
+// Temperature, supply voltage and hardware error status are cached rather
+// than read per sample: they sit outside the contiguous 126-135 block the
+// main read covers, and move over seconds. The robot refreshes them on this
+// period and every reply carries the last values, so the host can ask as
+// fast as it likes without touching a servo for them.
 const uint32_t TELEMETRY_TEMP_PERIOD_MS = 1000;
 // Only kept fresh while a host is actually asking - standalone mode should
 // spend exactly zero bus time on telemetry.
@@ -94,7 +95,13 @@ const uint32_t TELEMETRY_IDLE_TIMEOUT_MS = 3000;
 #ifndef Q8BOT_FW_VERSION
 #define Q8BOT_FW_VERSION "unknown"
 #endif
+#ifdef Q8_POWER_TEST
+// The power-test build (env:robot_power_test) says so, so it's never
+// mistaken for normal firmware.
+static const char FIRMWARE_ID[] = "Q8BOT_FW|robot|" Q8BOT_FW_VERSION "+powertest";
+#else
 static const char FIRMWARE_ID[] = "Q8BOT_FW|robot|" Q8BOT_FW_VERSION;
+#endif
 
 
 // ============================================================================
@@ -709,6 +716,8 @@ void gaitRunnerTask(void* parameter) {
   static DataMessage telemetryMsg;
   static TelemetryPayload telemetry = {};
   static int8_t cachedTemperature[8] = {0};
+  static uint8_t cachedVoltage[8] = {0};
+  static uint8_t cachedHwError[8] = {0};
   static uint32_t lastTempSampleMs = 0;
 
   while (true) {
@@ -731,13 +740,15 @@ void gaitRunnerTask(void* parameter) {
 
     if (hostWantsTelemetry && (nowMs - lastTempSampleMs) >= TELEMETRY_TEMP_PERIOD_MS) {
       lastTempSampleMs = nowMs;
-      q8.readTemperature(cachedTemperature);
+      q8.readServoHealth(cachedTemperature, cachedVoltage, cachedHwError);
     }
 
     if (telemetryRequested) {
       telemetryRequested = false;
       if (paired && q8.readJointState(telemetry)) {
         memcpy(telemetry.temperature, cachedTemperature, sizeof(cachedTemperature));
+        memcpy(telemetry.voltage, cachedVoltage, sizeof(cachedVoltage));
+        memcpy(telemetry.hwError, cachedHwError, sizeof(cachedHwError));
         telemetryMsg.msgType = DATA;
         telemetryMsg.id = 0;
         buildFrame((uint8_t)ReplyType::TELEMETRY_REPLY,
@@ -852,6 +863,13 @@ void setup() {
     uint16_t bootPct = batteryGetPercent();
     BootBatteryBand band = classifyBootBattery(bootPct);
     Serial.printf("[BATTERY] Boot check: %d%%\n", bootPct);
+#ifdef Q8_POWER_TEST
+    // No software cutoff in the power-test build: a battery run goes all the
+    // way down to the PCB's undervoltage protection, even if the robot
+    // restarts on the way.
+    Serial.println("[BATTERY] Power-test build - the boot battery cutoff is off");
+    if (band == BOOT_BATTERY_CRITICAL) band = BOOT_BATTERY_RED;
+#endif
 
     switch (band) {
       case BOOT_BATTERY_GREEN:  breatheOnce(0, 255, 0, 2000);   break;
@@ -1026,6 +1044,7 @@ void setup() {
   q8.attachRGB(&rgb);
   q8.attachGaitRunner(&gaitRunner);
   q8.attachStorage(&storage);
+  q8.attachRails(&rail5V, &rail6V);
 }
 
 // Loop does nothing - all work done in FreeRTOS tasks

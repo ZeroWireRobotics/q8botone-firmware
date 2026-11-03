@@ -17,7 +17,9 @@
 // any change the other side has to know about: a new or changed command or
 // reply, a payload layout, gait/direction IDs. Must equal protocol.py's
 // PROTOCOL_VERSION. Not yet exchanged or checked on connect.
-static const uint8_t PROTOCOL_VERSION = 3;  // 2: SENSOR_REQUEST / SENSOR_REPLY; 3: GAIT_RUN must be repeated
+static const uint8_t PROTOCOL_VERSION = 4;  // 2: SENSOR_REQUEST / SENSOR_REPLY; 3: GAIT_RUN must be repeated;
+                                            // 4: TELEMETRY_REPLY adds servo voltage + hardware errors (72 bytes),
+                                            //    POWER_RAIL, LED_BRIGHTNESS's don't-save flag
 
 static const uint8_t FRAME_START = 0xAA;
 static const size_t FRAME_HEADER_LEN = 2;   // msg_type, length
@@ -35,9 +37,12 @@ enum class CmdType : uint8_t {          // host -> robot
   GAIT_STOP       = 0x07,  // no payload - stop autonomous gait, hand control back to raw MOVE
   GREET           = 0x08,  // no payload - scripted greeting sequence, runs entirely on the robot
   HOST_CONNECTED  = 0x09,  // no payload - controller-local only, never forwarded to the robot
-  LED_BRIGHTNESS  = 0x0A,  // {brightness: uint8, 0-255} - sets & persists the robot's RGB LED brightness
+  LED_BRIGHTNESS  = 0x0A,  // {brightness: uint8, 0-255[, flags: uint8]} - sets & persists the robot's
+                           // RGB LED brightness; flags bit 0 = this once, don't persist it
   TELEMETRY_REQUEST = 0x0B,  // no payload - ask for one joint snapshot; answered with TELEMETRY_REPLY
   SENSOR_REQUEST  = 0x0C,  // no payload - sample the robot's Qwiic sensors; answered with SENSOR_REPLY
+  POWER_RAIL      = 0x0D,  // {rail: uint8 5|6, on: uint8} - switch a buck converter, for power
+                           // measurements; 6V off cuts the servos' power, torque off until a restart
 };
 
 enum class ReplyType : uint8_t {        // robot -> host

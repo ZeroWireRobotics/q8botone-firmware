@@ -16,6 +16,7 @@ using namespace ControlTableItem;
 class RGBManager;  // Forward declaration - see RGBManager.h
 class GaitRunner;  // Forward declaration - see gaitRunner.h
 class macStorage;  // Forward declaration - see macStorage.h
+class PowerRail;   // Forward declaration - see powerRail.h
 
 class q8Dynamixel
 {
@@ -25,6 +26,7 @@ class q8Dynamixel
     void attachRGB(RGBManager* rgb);  // Optional - lets jump() dim the LED during its current spike
     void attachGaitRunner(GaitRunner* gaitRunner);  // Lets parseFrame() dispatch GAIT_RUN/GAIT_STOP
     void attachStorage(macStorage* storage);  // Lets parseFrame() persist LED_BRIGHTNESS to NVS
+    void attachRails(PowerRail* rail5V, PowerRail* rail6V);  // Lets parseFrame() switch the bucks (POWER_RAIL)
     bool checkComms(uint8_t ID);
     bool commStart();
     uint16_t checkBattery();
@@ -48,8 +50,8 @@ class q8Dynamixel
     void bulkWriteDeg(const float degs[8]);  // Converts to raw ticks via _deg2Dxl, then bulkWrite
     void moveToIdle(uint16_t dur = 500);  // Move all legs to the precomputed idle/neutral pose
     // Reads present position and current for all 8 joints into out (see
-    // protocol.h's TelemetryPayload). Leaves out.temperature alone - that is
-    // sampled separately by readTemperature(), since it sits outside the
+    // protocol.h's TelemetryPayload). Leaves out.temperature and the rest alone -
+    // those are sampled separately by readServoHealth(), since they sit outside the
     // contiguous 126-135 block and changes far too slowly to be worth the
     // extra bus time on every sample.
     //
@@ -57,10 +59,13 @@ class q8Dynamixel
     // flowing. Returns false if the servos didn't all answer.
     bool readJointState(struct TelemetryPayload& out);
 
-    // Samples present temperature for all 8 joints. Its own transaction
-    // rather than a wider readJointState(), which would cost ~0.9ms more on
-    // every sample for a value that moves over seconds.
-    bool readTemperature(int8_t out[8]);
+    // Samples what each servo says about its own health: temperature (degC),
+    // supply voltage (0.1 V) and Hardware Error Status (register 70, nonzero
+    // once it has shut itself down). Their own transactions rather than a
+    // wider readJointState(), since they change over seconds. A servo in
+    // error still answers reads, so this keeps working after one faults. An
+    // array is left as it was if its read fails; false if either did.
+    bool readServoHealth(int8_t temperature[8], uint8_t voltage[8], uint8_t hwError[8]);
     void jump();
     void greet();      // Scripted greeting sequence (no host required)
     void trotDemo();   // A few trot steps forward, then a few steps backward (no host required)
@@ -121,6 +126,9 @@ class q8Dynamixel
     RGBManager* _rgb = nullptr;
     GaitRunner* _gaitRunner = nullptr;
     macStorage* _storage = nullptr;
+    PowerRail* _rail5V = nullptr;
+    PowerRail* _rail6V = nullptr;
+    bool _servosUnpowered = false;  // POWER_RAIL cut the 6V buck - torque stays off until a restart
     int32_t _deg2Dxl(float deg);
     float _dxl2Deg(int32_t dxlRaw);
     // Plays a frame table at a constant per-frame delay. Used by trotDemo().
@@ -189,18 +197,25 @@ class q8Dynamixel
     DYNAMIXEL::InfoSyncReadInst_t _sr_infos;
     DYNAMIXEL::XELInfoSyncRead_t _info_xels_sr[_idCount];
 
-    // Second sync-read set, for the temperature-only transaction. Separate
-    // from _sr_* so the two reads don't have to reconfigure each other's
+    // Second and third sync-read sets, for readServoHealth(). Separate from
+    // _sr_* so the reads don't have to reconfigure each other's
     // address/length every time they alternate.
-    const uint16_t TR_START_ADDR = 146;  // Present Temperature
-    const uint16_t TR_ADDR_LEN = 1;
+    const uint16_t TR_START_ADDR = 144;  // Present Input Voltage, then Present Temperature
+    const uint16_t TR_ADDR_LEN = 3;
     typedef struct tr_data{
+      uint16_t present_input_voltage;    // 0.1 V
       uint8_t present_temperature;
     } __attribute__((packed)) tr_data_t;
     tr_data_t _tr_data[_idCount];
     uint8_t _tr_pkt_buf[_user_pkt_buf_cap];
     DYNAMIXEL::InfoSyncReadInst_t _tr_infos;
     DYNAMIXEL::XELInfoSyncRead_t _info_xels_tr[_idCount];
+    const uint16_t ER_START_ADDR = 70;   // Hardware Error Status
+    const uint16_t ER_ADDR_LEN = 1;
+    uint8_t _er_data[_idCount];
+    uint8_t _er_pkt_buf[_user_pkt_buf_cap];
+    DYNAMIXEL::InfoSyncReadInst_t _er_infos;
+    DYNAMIXEL::XELInfoSyncRead_t _info_xels_er[_idCount];
     sw_data_t _sw_data[_idCount];
     DYNAMIXEL::InfoSyncWriteInst_t _sw_infos;
     DYNAMIXEL::XELInfoSyncWrite_t _info_xels_sw[_idCount];

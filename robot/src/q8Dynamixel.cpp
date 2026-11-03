@@ -11,6 +11,7 @@
 #include <protocol.h>
 #include <gaitRunner.h>
 #include <macStorage.h>
+#include <powerRail.h>
 
 using namespace ControlTableItem;
 
@@ -30,6 +31,11 @@ void q8Dynamixel::attachGaitRunner(GaitRunner* gaitRunner){
 
 void q8Dynamixel::attachStorage(macStorage* storage){
   _storage = storage;
+}
+
+void q8Dynamixel::attachRails(PowerRail* rail5V, PowerRail* rail6V){
+  _rail5V = rail5V;
+  _rail6V = rail6V;
 }
 
 bool q8Dynamixel::lockBus(TickType_t timeout){
@@ -97,7 +103,8 @@ void q8Dynamixel::begin(){
   }
   _sr_infos.is_info_changed = true;
 
-  // Second sync-read set: temperature only (see readTemperature).
+  // Second and third sync-read sets: supply voltage + temperature, and
+  // hardware error status (see readServoHealth).
   _tr_infos.packet.buf_capacity = _user_pkt_buf_cap;
   _tr_infos.packet.p_buf = _tr_pkt_buf;
   _tr_infos.packet.is_completed = false;
@@ -112,6 +119,21 @@ void q8Dynamixel::begin(){
     _tr_infos.xel_count++;
   }
   _tr_infos.is_info_changed = true;
+
+  _er_infos.packet.buf_capacity = _user_pkt_buf_cap;
+  _er_infos.packet.p_buf = _er_pkt_buf;
+  _er_infos.packet.is_completed = false;
+  _er_infos.addr = ER_START_ADDR;
+  _er_infos.addr_length = ER_ADDR_LEN;
+  _er_infos.p_xels = _info_xels_er;
+  _er_infos.xel_count = 0;
+
+  for (int i = 0; i < _idCount; i++){
+    _info_xels_er[i].id = _DXL[i];
+    _info_xels_er[i].p_recv_buf = &_er_data[i];
+    _er_infos.xel_count++;
+  }
+  _er_infos.is_info_changed = true;
 
   setProfile(1000);
   expandArrays();
@@ -135,15 +157,22 @@ bool q8Dynamixel::readJointState(TelemetryPayload& out){
   return true;
 }
 
-bool q8Dynamixel::readTemperature(int8_t out[8]){
+bool q8Dynamixel::readServoHealth(int8_t temperature[8], uint8_t voltage[8], uint8_t hwError[8]){
   BusGuard guard(*this);
 
-  if (_dxl.fastSyncRead(&_tr_infos) != _idCount) return false;
-
-  for (uint8_t i = 0; i < _idCount; i++){
-    out[i] = (int8_t)_tr_data[i].present_temperature;
+  bool health = _dxl.fastSyncRead(&_tr_infos) == _idCount;
+  if (health){
+    for (uint8_t i = 0; i < _idCount; i++){
+      temperature[i] = (int8_t)_tr_data[i].present_temperature;
+      uint16_t v = _tr_data[i].present_input_voltage;
+      voltage[i] = v > 255 ? 255 : (uint8_t)v;
+    }
   }
-  return true;
+  bool errors = _dxl.fastSyncRead(&_er_infos) == _idCount;
+  if (errors){
+    memcpy(hwError, _er_data, _idCount);
+  }
+  return health && errors;
 }
 
 bool q8Dynamixel::checkComms(uint8_t ID){
@@ -566,6 +595,10 @@ uint8_t q8Dynamixel::parseFrame(const uint8_t* buf, size_t bufCapacity) {
     case CmdType::TORQUE_SET: {
       if (payloadLen < 1) return 0;
       uint8_t mode = payload[0];  // 0=off, 1=on, 2=damping
+      if (mode != 0 && _servosUnpowered) {
+        Serial.println("[ROBOT] Torque on refused - the servos lost power (POWER_RAIL); restart the robot first");
+        return 0;
+      }
       if (mode != _prevJointMode) {
         const char* label = (mode == 2) ? "damping" : (mode == 1 ? "on" : "off");
         Serial.printf("[ROBOT] Torque %s\n", label);
@@ -595,11 +628,13 @@ uint8_t q8Dynamixel::parseFrame(const uint8_t* buf, size_t bufCapacity) {
       return 0;
 
     case CmdType::JUMP:
+      if (_servosUnpowered) return 0;  // jump() turns torque on itself - see POWER_RAIL
       if (_jumpEnabled) jump();
       else warnJumpBlocked();
       return 0;
 
     case CmdType::GREET:
+      if (_servosUnpowered) return 0;
       greet();
       return 0;
 
@@ -616,7 +651,35 @@ uint8_t q8Dynamixel::parseFrame(const uint8_t* buf, size_t bufCapacity) {
     case CmdType::LED_BRIGHTNESS: {
       if (payloadLen < 1) return 0;
       if (_rgb) _rgb->setBrightness(payload[0]);
-      if (_storage) _storage->saveLedBrightness(payload[0]);
+      // Flags bit 0: just for now, don't save it (a measurement turning the
+      // light off) - a restart brings back the saved brightness.
+      bool keep = payloadLen >= 2 && (payload[1] & 0x01);
+      if (_storage && !keep) _storage->saveLedBrightness(payload[0]);
+      return 0;
+    }
+
+    case CmdType::POWER_RAIL: {
+      // For power measurements, like the serial '5' / '6' toggles but over
+      // the radio. Cutting the 6V buck takes the servos' power: torque goes
+      // off first, and stays off until the robot restarts - a servo that
+      // lost power comes back with its RAM settings (the motion profile
+      // among them) reset, and nothing here sets them again.
+      if (payloadLen < 2) return 0;
+      PowerRail* rail = payload[0] == 5 ? _rail5V : (payload[0] == 6 ? _rail6V : nullptr);
+      if (!rail) return 0;
+      bool on = payload[1] != 0;
+      if (rail == _rail6V && !on) {
+        if (_torqueFlag) {
+          setJointMode(0);
+          _prevJointMode = 0;
+        }
+        _servosUnpowered = true;
+      }
+      rail->set(on);
+      Serial.printf("[POWER] %uV buck %s (POWER_RAIL)\n", payload[0], on ? "ON" : "OFF");
+      if (rail == _rail6V && on) {
+        Serial.println("[POWER] Servos powered again - restart the robot before turning the motors on");
+      }
       return 0;
     }
 
