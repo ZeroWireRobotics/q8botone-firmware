@@ -65,7 +65,19 @@ class q8Dynamixel
     // wider readJointState(), since they change over seconds. A servo in
     // error still answers reads, so this keeps working after one faults. An
     // array is left as it was if its read fails; false if either did.
-    bool readServoHealth(int8_t temperature[8], uint8_t voltage[8], uint8_t hwError[8]);
+    //
+    // Also the torque watchdog: with the motors on, a servo found with its
+    // torque off and no hardware error - restarted, most likely - gets its
+    // settings and torque back. restored counts that per servo since boot.
+    bool readServoHealth(int8_t temperature[8], uint8_t voltage[8], uint8_t hwError[8],
+                         uint8_t restored[8]);
+    // DYNAMIXEL's Reboot instruction for one servo (slot 1-8) - short of a
+    // power cycle, the only way to clear its Hardware Error Status and let
+    // its torque on again. Puts back what the restart reset (see SERVO_REBOOT).
+    bool rebootServo(uint8_t slot);
+    // Call often (gaitRunnerTask, every tick): puts a servo that just eased
+    // back into its pose onto the others' profile again - see returnToCommanded().
+    void serviceReturn(uint32_t nowMs);
     void jump();
     void greet();      // Scripted greeting sequence (no host required)
     void trotDemo();   // A few trot steps forward, then a few steps backward (no host required)
@@ -129,6 +141,28 @@ class q8Dynamixel
     PowerRail* _rail5V = nullptr;
     PowerRail* _rail6V = nullptr;
     bool _servosUnpowered = false;  // POWER_RAIL cut the 6V buck - torque stays off until a restart
+    // What setProfile() / setGain() last wrote to every servo - what a
+    // rebooted one gets back.
+    uint16_t _appliedProfile = 0;
+    uint16_t _appliedGain = 400;
+    // A restarted servo's RAM is back at its defaults: put back the profile
+    // and gain the others run with.
+    void restoreSettings(uint8_t id);
+    uint8_t _restored[8] = {0};   // torque watchdog recoveries per slot (wraps at 255)
+
+    // The pose every joint was last told to take, in its own turn - what
+    // bulkWrite() last wrote, or where holdPresentPose() held it. Not valid
+    // until one of them has run.
+    int32_t _commanded[8] = {0};
+    bool _commandedValid = false;
+    // After a servo comes back (the torque watchdog, SERVO_REBOOT): every
+    // joint back to `commanded`, the ones in slowMask (bit = slot - 1) -
+    // limp until just now, their legs dropped - over RETURN_MS rather than
+    // at full speed. Not during a gait: its next frames drive every leg.
+    void returnToCommanded(const int32_t commanded[8], uint8_t slowMask);
+    static const uint16_t RETURN_MS = 1000;
+    volatile uint8_t _slowMask = 0;   // servos still on that slow profile...
+    uint32_t _slowUntil = 0;          // ...until about then - see serviceReturn()
     int32_t _deg2Dxl(float deg);
     float _dxl2Deg(int32_t dxlRaw);
     // Plays a frame table at a constant per-frame delay. Used by trotDemo().
@@ -210,9 +244,19 @@ class q8Dynamixel
     uint8_t _tr_pkt_buf[_user_pkt_buf_cap];
     DYNAMIXEL::InfoSyncReadInst_t _tr_infos;
     DYNAMIXEL::XELInfoSyncRead_t _info_xels_tr[_idCount];
-    const uint16_t ER_START_ADDR = 70;   // Hardware Error Status
-    const uint16_t ER_ADDR_LEN = 1;
-    uint8_t _er_data[_idCount];
+    // Torque Enable (64) through Hardware Error Status (70) in one read -
+    // what the torque watchdog needs. 66-67 aren't used; they read as 0.
+    const uint16_t ER_START_ADDR = 64;
+    const uint16_t ER_ADDR_LEN = 7;
+    typedef struct er_data{
+      uint8_t torque_enable;             // 64
+      uint8_t led;                       // 65
+      uint8_t unused[2];                 // 66-67
+      uint8_t status_return_level;       // 68
+      uint8_t registered_instruction;    // 69
+      uint8_t hardware_error_status;     // 70
+    } __attribute__((packed)) er_data_t;
+    er_data_t _er_data[_idCount];
     uint8_t _er_pkt_buf[_user_pkt_buf_cap];
     DYNAMIXEL::InfoSyncReadInst_t _er_infos;
     DYNAMIXEL::XELInfoSyncRead_t _info_xels_er[_idCount];

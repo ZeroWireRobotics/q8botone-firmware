@@ -18,8 +18,8 @@
 // reply, a payload layout, gait/direction IDs. Must equal protocol.py's
 // PROTOCOL_VERSION. Not yet exchanged or checked on connect.
 static const uint8_t PROTOCOL_VERSION = 4;  // 2: SENSOR_REQUEST / SENSOR_REPLY; 3: GAIT_RUN must be repeated;
-                                            // 4: TELEMETRY_REPLY adds servo voltage + hardware errors (72 bytes),
-                                            //    POWER_RAIL, LED_BRIGHTNESS's don't-save flag
+                                            // 4: TELEMETRY_REPLY adds servo voltage, hardware errors, torque restores (80 bytes),
+                                            //    POWER_RAIL, SERVO_REBOOT, LED_BRIGHTNESS's don't-save flag
 
 static const uint8_t FRAME_START = 0xAA;
 static const size_t FRAME_HEADER_LEN = 2;   // msg_type, length
@@ -43,6 +43,8 @@ enum class CmdType : uint8_t {          // host -> robot
   SENSOR_REQUEST  = 0x0C,  // no payload - sample the robot's Qwiic sensors; answered with SENSOR_REPLY
   POWER_RAIL      = 0x0D,  // {rail: uint8 5|6, on: uint8} - switch a buck converter, for power
                            // measurements; 6V off cuts the servos' power, torque off until a restart
+  SERVO_REBOOT    = 0x0E,  // {slot: uint8, 1-8} - restart one servo (DYNAMIXEL Reboot), clearing its
+                           // hardware error; the robot puts back its profile, gain and torque
 };
 
 enum class ReplyType : uint8_t {        // robot -> host

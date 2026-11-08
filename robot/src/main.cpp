@@ -81,8 +81,9 @@ void printLineNow(const char* line);   // defined below, with the sensor task
 // period and every reply carries the last values, so the host can ask as
 // fast as it likes without touching a servo for them.
 const uint32_t TELEMETRY_TEMP_PERIOD_MS = 1000;
-// Only kept fresh while a host is actually asking - standalone mode should
-// spend exactly zero bus time on telemetry.
+// Only kept fresh while a host is actually asking, or the motors are on (the
+// torque watchdog in readServoHealth() - one short read a second). With the
+// motors off and nobody asking, no bus time goes on it.
 const uint32_t TELEMETRY_IDLE_TIMEOUT_MS = 3000;
 
 // Which firmware this is. The desktop app's flasher reads it two ways: sent
@@ -673,6 +674,15 @@ void serialOutputTask(void* parameter) {
         q8.lockBus();                        // the scan has the bus to itself
         motorSetupScan(q8dxl, printLineNow);
         q8.unlockBus();
+      } else if (c == 'R') {
+        // Restart slot 1's servo and tell nothing else - as a supply dip under
+        // load would. With the motors on, the torque watchdog (readServoHealth)
+        // should bring it back within a second or so.
+        q8.lockBus();
+        bool restarted = q8dxl.reboot(MOTOR_FIRST_ID);
+        q8.unlockBus();
+        queuePrint(MSG_INFO, restarted ? "[ROBOT] Slot 1 restarted (serial R), as if its supply had dipped\n"
+                                       : "[ROBOT] Slot 1 didn't answer the restart (serial R)\n");
       } else if (c == 'F') {
         factoryResetAskedAt = millis();
         queuePrint(MSG_INFO, "[MOTORS] Type Y within 5 s to reset all 8 servos to factory settings - "
@@ -718,6 +728,7 @@ void gaitRunnerTask(void* parameter) {
   static int8_t cachedTemperature[8] = {0};
   static uint8_t cachedVoltage[8] = {0};
   static uint8_t cachedHwError[8] = {0};
+  static uint8_t cachedRestored[8] = {0};
   static uint32_t lastTempSampleMs = 0;
 
   while (true) {
@@ -738,10 +749,11 @@ void gaitRunnerTask(void* parameter) {
     uint32_t nowMs = millis();
     bool hostWantsTelemetry = (nowMs - lastTelemetryRequestMs) < TELEMETRY_IDLE_TIMEOUT_MS;
 
-    if (hostWantsTelemetry && (nowMs - lastTempSampleMs) >= TELEMETRY_TEMP_PERIOD_MS) {
+    if ((hostWantsTelemetry || q8.isTorqueOn()) && (nowMs - lastTempSampleMs) >= TELEMETRY_TEMP_PERIOD_MS) {
       lastTempSampleMs = nowMs;
-      q8.readServoHealth(cachedTemperature, cachedVoltage, cachedHwError);
+      q8.readServoHealth(cachedTemperature, cachedVoltage, cachedHwError, cachedRestored);
     }
+    q8.serviceReturn(nowMs);   // a servo that eased back after a restart: its usual profile again
 
     if (telemetryRequested) {
       telemetryRequested = false;
@@ -749,6 +761,7 @@ void gaitRunnerTask(void* parameter) {
         memcpy(telemetry.temperature, cachedTemperature, sizeof(cachedTemperature));
         memcpy(telemetry.voltage, cachedVoltage, sizeof(cachedVoltage));
         memcpy(telemetry.hwError, cachedHwError, sizeof(cachedHwError));
+        memcpy(telemetry.restored, cachedRestored, sizeof(cachedRestored));
         telemetryMsg.msgType = DATA;
         telemetryMsg.id = 0;
         buildFrame((uint8_t)ReplyType::TELEMETRY_REPLY,

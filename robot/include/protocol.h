@@ -18,8 +18,8 @@
 // reply, a payload layout, gait/direction IDs. Must equal protocol.py's
 // PROTOCOL_VERSION. Not yet exchanged or checked on connect.
 static const uint8_t PROTOCOL_VERSION = 4;  // 2: SENSOR_REQUEST / SENSOR_REPLY; 3: GAIT_RUN must be repeated;
-                                            // 4: TELEMETRY_REPLY adds servo voltage + hardware errors (72 bytes),
-                                            //    POWER_RAIL, LED_BRIGHTNESS's don't-save flag
+                                            // 4: TELEMETRY_REPLY adds servo voltage, hardware errors, torque restores (80 bytes),
+                                            //    POWER_RAIL, SERVO_REBOOT, LED_BRIGHTNESS's don't-save flag
 
 static const uint8_t FRAME_START = 0xAA;
 static const size_t FRAME_HEADER_LEN = 2;   // msg_type, length
@@ -43,6 +43,8 @@ enum class CmdType : uint8_t {          // host -> robot
   SENSOR_REQUEST  = 0x0C,  // no payload - sample the Qwiic sensors; answered with SENSOR_REPLY
   POWER_RAIL      = 0x0D,  // {rail: uint8 5|6, on: uint8} - switch a buck converter, for power
                            // measurements; 6V off cuts the servos' power, torque off until a restart
+  SERVO_REBOOT    = 0x0E,  // {slot: uint8, 1-8} - restart one servo (DYNAMIXEL Reboot), clearing its
+                           // hardware error; the robot puts back its profile, gain and torque
 };
 
 // Canonical direction ordering for GAIT_RUN's direction_id (0-11). Must
@@ -77,11 +79,12 @@ enum class SensorKind : uint8_t {
 static const size_t SENSOR_REPLY_HEADER_LEN = 5;  // t_ms + count
 static const size_t SENSOR_BLOCK_HEADER_LEN = 3;  // kind + addr + n
 
-// Payload of TELEMETRY_REPLY: one snapshot of all 8 joints, 72 bytes.
+// Payload of TELEMETRY_REPLY: one snapshot of all 8 joints, 80 bytes.
 // Position and current are read fresh; temperature, voltage and hwError are
 // whatever the robot last sampled (see TELEMETRY_TEMP_PERIOD_MS) since they
 // live outside the contiguous 126-135 block and change over seconds, not
-// milliseconds. Protocol 3 and earlier sent only the first 56 bytes.
+// milliseconds. Protocol 3 and earlier sent only the first 56 bytes; the first
+// protocol 4 builds, 72 (no restored).
 // Layout must match q8botone-python/q8bot/protocol.py's TELEMETRY_STRUCT.
 struct __attribute__((packed)) TelemetryPayload {
   int32_t position[8];     // raw Dynamixel ticks
@@ -89,8 +92,9 @@ struct __attribute__((packed)) TelemetryPayload {
   int8_t  temperature[8];  // degrees C
   uint8_t voltage[8];      // the servo's supply, 0.1 V
   uint8_t hwError[8];      // Hardware Error Status (70): 0 = fine, else it has shut itself down
+  uint8_t restored[8];     // times the torque watchdog turned it back on since boot (wraps at 255)
 };
-static_assert(sizeof(TelemetryPayload) == 72, "TelemetryPayload must stay 72 bytes");
+static_assert(sizeof(TelemetryPayload) == 80, "TelemetryPayload must stay 80 bytes");
 
 inline uint16_t crc16Arc(const uint8_t* data, size_t len, uint16_t crc = 0x0000){
   for (size_t i = 0; i < len; i++){

@@ -130,7 +130,7 @@ void q8Dynamixel::begin(){
 
   for (int i = 0; i < _idCount; i++){
     _info_xels_er[i].id = _DXL[i];
-    _info_xels_er[i].p_recv_buf = &_er_data[i];
+    _info_xels_er[i].p_recv_buf = (uint8_t*)&_er_data[i];
     _er_infos.xel_count++;
   }
   _er_infos.is_info_changed = true;
@@ -157,7 +157,8 @@ bool q8Dynamixel::readJointState(TelemetryPayload& out){
   return true;
 }
 
-bool q8Dynamixel::readServoHealth(int8_t temperature[8], uint8_t voltage[8], uint8_t hwError[8]){
+bool q8Dynamixel::readServoHealth(int8_t temperature[8], uint8_t voltage[8], uint8_t hwError[8],
+                                  uint8_t restored[8]){
   BusGuard guard(*this);
 
   bool health = _dxl.fastSyncRead(&_tr_infos) == _idCount;
@@ -170,9 +171,46 @@ bool q8Dynamixel::readServoHealth(int8_t temperature[8], uint8_t voltage[8], uin
   }
   bool errors = _dxl.fastSyncRead(&_er_infos) == _idCount;
   if (errors){
-    memcpy(hwError, _er_data, _idCount);
+    for (uint8_t i = 0; i < _idCount; i++){
+      hwError[i] = _er_data[i].hardware_error_status;
+    }
   }
+
+  // The torque watchdog. With the motors on, a servo with its torque off and
+  // no hardware error has restarted - a supply dip under a heavy load can
+  // reset one - and come back limp, its RAM settings at their defaults. Put
+  // those back and turn it on again, holding every leg where it is. One with
+  // a hardware error stays off: only a reboot clears that (SERVO_REBOOT).
+  // Under the same BusGuard as the read, so it can't catch a torque change
+  // halfway - setJointMode(), toggleTorque() and the scripted moves hold it too.
+  if (errors && _torqueFlag && !_servosUnpowered){
+    uint8_t limp = 0;
+    for (uint8_t i = 0; i < _idCount; i++){
+      if (_er_data[i].torque_enable || _er_data[i].hardware_error_status) continue;
+      restoreSettings(_DXL[i]);
+      _restored[i]++;
+      limp |= 1 << i;
+      Serial.printf("[ROBOT] Slot %u had its torque off (restarted?) - back on\n", i + 1);
+    }
+    if (limp){
+      // Then back to the pose the legs were told to take - the limp one's
+      // has dropped meanwhile - easing it there (see returnToCommanded()).
+      int32_t commanded[_idCount];
+      memcpy(commanded, _commanded, sizeof(commanded));
+      bool known = _commandedValid;
+      enableTorque();   // holds where they are first, and re-learns each one's turn
+      if (known) returnToCommanded(commanded, limp);
+    }
+  }
+  memcpy(restored, _restored, _idCount);
   return health && errors;
+}
+
+void q8Dynamixel::restoreSettings(uint8_t id){
+  BusGuard guard(*this);
+  _dxl.writeControlTableItem(PROFILE_VELOCITY, id, _appliedProfile);
+  _dxl.writeControlTableItem(PROFILE_ACCELERATION, id, _appliedProfile / 3);
+  _dxl.writeControlTableItem(POSITION_P_GAIN, id, _appliedGain);
 }
 
 bool q8Dynamixel::checkComms(uint8_t ID){
@@ -209,6 +247,10 @@ void q8Dynamixel::disableTorque(){
 }
 
 void q8Dynamixel::toggleTorque(bool flag){
+  // The flag with the hardware, under one BusGuard - the torque watchdog in
+  // readServoHealth() would otherwise see torque off with the flag still on.
+  BusGuard guard(*this);
+  _torqueFlag = flag;
   if(flag){
     enableTorque();
   } else{
@@ -263,6 +305,8 @@ void q8Dynamixel::setProfile(uint16_t dur){
     _dxl.writeControlTableItem(PROFILE_VELOCITY, _DXL[i], dur);
     _dxl.writeControlTableItem(PROFILE_ACCELERATION, _DXL[i], dur / 3);
   }
+  _appliedProfile = dur;
+  _slowMask = 0;   // every servo on this profile now, any easing back included
 }
 
 void q8Dynamixel::setGain(uint16_t p_gain){
@@ -271,6 +315,42 @@ void q8Dynamixel::setGain(uint16_t p_gain){
   for (int i = 0; i < _idCount; i++){
     _dxl.writeControlTableItem(POSITION_P_GAIN, _DXL[i], p_gain);
   }
+  _appliedGain = p_gain;
+}
+
+bool q8Dynamixel::rebootServo(uint8_t slot){
+  if (slot < 1 || slot > _idCount) return false;
+  BusGuard guard(*this);
+  if (_gaitRunner) _gaitRunner->stop();
+  const uint8_t id = _DXL[slot - 1];
+  _dxl.reboot(id);
+  // It answers again once it has started up.
+  bool back = false;
+  for (int waited = 0; waited < 1000 && !back; waited += 50){
+    delay(50);
+    back = _dxl.ping(id);
+  }
+  if (!back){
+    Serial.printf("[ROBOT] Slot %u didn't answer after its restart\n", slot);
+    return false;
+  }
+  // It restarts as if just powered: RAM back to defaults - no motion
+  // profile, default gains, torque off. Put back what the others run with.
+  restoreSettings(id);
+  // Motors on: back on too. enableTorque() first holds every leg where it
+  // is - this one included, even if it came up a turn away - so nothing
+  // jumps; then they go back to where they were told to be, this one's
+  // leg eased there (see returnToCommanded()).
+  if (_torqueFlag){
+    int32_t commanded[_idCount];
+    memcpy(commanded, _commanded, sizeof(commanded));
+    bool known = _commandedValid;
+    enableTorque();
+    if (known) returnToCommanded(commanded, 1 << (slot - 1));
+  }
+  Serial.printf("[ROBOT] Slot %u restarted - its hardware error is cleared%s\n",
+                slot, _torqueFlag ? ", torque back on" : "");
+  return true;
 }
 
 void q8Dynamixel::moveSingle(int32_t val){
@@ -283,9 +363,12 @@ void q8Dynamixel::moveSingle(int32_t val){
 void q8Dynamixel::bulkWrite(int32_t values[8]){
   // 8 motors move to their respective positions, each in the turn it
   // counts itself in (see _turnTicks)
+  BusGuard guard(*this);
   int32_t raw[_idCount];
   for (int i = 0; i < _idCount; i++) raw[i] = values[i] + _turnTicks[i];
   writeGoalsRaw(raw);
+  memcpy(_commanded, values, sizeof(_commanded));
+  _commandedValid = true;
 }
 
 void q8Dynamixel::writeGoalsRaw(const int32_t raw[8]){
@@ -378,7 +461,36 @@ bool q8Dynamixel::holdPresentPose(){
     present[i] = _sr_data[i].present_position;
   }
   writeGoalsRaw(present);
+  // Held here, so this is where they were last told to be.
+  for (uint8_t i = 0; i < _idCount; i++) _commanded[i] = present[i] - _turnTicks[i];
+  _commandedValid = true;
   return true;
+}
+
+void q8Dynamixel::returnToCommanded(const int32_t commanded[8], uint8_t slowMask){
+  BusGuard guard(*this);
+  if (_gaitRunner && _gaitRunner->isActive()) return;
+  for (uint8_t i = 0; i < _idCount; i++){
+    if (!(slowMask & (1 << i))) continue;
+    _dxl.writeControlTableItem(PROFILE_VELOCITY, _DXL[i], RETURN_MS);
+    _dxl.writeControlTableItem(PROFILE_ACCELERATION, _DXL[i], RETURN_MS / 3);
+  }
+  int32_t pose[_idCount];
+  memcpy(pose, commanded, sizeof(pose));
+  bulkWrite(pose);
+  _slowUntil = millis() + RETURN_MS + 200;
+  _slowMask |= slowMask;
+}
+
+void q8Dynamixel::serviceReturn(uint32_t nowMs){
+  if (!_slowMask || (int32_t)(nowMs - _slowUntil) < 0) return;
+  BusGuard guard(*this);
+  for (uint8_t i = 0; i < _idCount; i++){
+    if (!(_slowMask & (1 << i))) continue;
+    _dxl.writeControlTableItem(PROFILE_VELOCITY, _DXL[i], _appliedProfile);
+    _dxl.writeControlTableItem(PROFILE_ACCELERATION, _DXL[i], _appliedProfile / 3);
+  }
+  _slowMask = 0;
 }
 
 bool q8Dynamixel::learnTurns(){
@@ -682,6 +794,13 @@ uint8_t q8Dynamixel::parseFrame(const uint8_t* buf, size_t bufCapacity) {
       }
       return 0;
     }
+
+    case CmdType::SERVO_REBOOT:
+      // Clears one servo's hardware error - see rebootServo(). Not with the
+      // 6V buck cut: nothing would answer.
+      if (payloadLen < 1 || _servosUnpowered) return 0;
+      rebootServo(payload[0]);
+      return 0;
 
     default:
       return 0;
