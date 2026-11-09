@@ -1,0 +1,11 @@
+#pragma once
+
+// Optional. The desktop app sets the camera's network (Tools > Camera Wi-Fi),
+// and a network it sets is kept in the camera's flash and wins over this file.
+// For a build that should start out on a network before that, copy this file
+// to wifi_config.h and fill it in. wifi_config.h is gitignored and should
+// never be committed.
+
+const char *ssid     = "YOUR_SSID";
+const char *password = "YOUR_PASSWORD";
+const int   channel  = 0;  // not used

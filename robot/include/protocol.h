@@ -1,7 +1,7 @@
 /*
   protocol.h - Binary framed wire protocol shared with
-  q8botone-python/q8bot/protocol.py and the other firmware project's copy of
-  this file. KEEP THESE THREE IN SYNC.
+  q8botone-python/q8bot/protocol.py and the other firmware projects' copies of
+  this file (controller/, camera/). KEEP THESE FOUR IN SYNC.
 
   [START=0xAA][MSG_TYPE][LENGTH][PAYLOAD...][CRC_LO][CRC_HI]
 
@@ -17,14 +17,30 @@
 // any change the other side has to know about: a new or changed command or
 // reply, a payload layout, gait/direction IDs. Must equal protocol.py's
 // PROTOCOL_VERSION. Not yet exchanged or checked on connect.
-static const uint8_t PROTOCOL_VERSION = 4;  // 2: SENSOR_REQUEST / SENSOR_REPLY; 3: GAIT_RUN must be repeated;
+static const uint8_t PROTOCOL_VERSION = 5;  // 2: SENSOR_REQUEST / SENSOR_REPLY; 3: GAIT_RUN must be repeated;
                                             // 4: TELEMETRY_REPLY adds servo voltage, hardware errors, torque restores (80 bytes),
-                                            //    POWER_RAIL, SERVO_REBOOT, LED_BRIGHTNESS's don't-save flag
+                                            //    POWER_RAIL, SERVO_REBOOT, LED_BRIGHTNESS's don't-save flag;
+                                            // 5: the camera - message ranges, CAM_STATUS_REQUEST, CAM_WIFI_SET, CAM_STATUS
 
 static const uint8_t FRAME_START = 0xAA;
 static const size_t FRAME_HEADER_LEN = 2;   // msg_type, length
 static const size_t FRAME_CRC_LEN = 2;
 static const size_t FRAME_OVERHEAD = 1 + FRAME_HEADER_LEN + FRAME_CRC_LEN;  // start+header+crc
+static const size_t FRAME_MAX_LEN = FRAME_OVERHEAD + 255;
+
+// Who a message is for, by its type - the robot routes on this:
+//   0x01-0x1F  commands for the robot   from the host over the radio, or from the camera
+//   0x20-0x3F  commands for the camera  the robot passes them on to its camera link
+//   0x81-0x9F  replies from the robot   back to whoever asked
+//   0xA0-0xBF  replies from the camera  the robot passes them on to the host
+inline bool isRobotCommand(uint8_t type)  { return type >= 0x01 && type <= 0x1F; }
+inline bool isCameraCommand(uint8_t type) { return type >= 0x20 && type <= 0x3F; }
+inline bool isRobotReply(uint8_t type)    { return type >= 0x81 && type <= 0x9F; }
+inline bool isCameraReply(uint8_t type)   { return type >= 0xA0 && type <= 0xBF; }
+
+// The camera link: a UART between the robot (TX1 IO2, RX1 IO3) and the camera
+// (a XIAO ESP32S3: D7 in, D8 out), carrying these same frames both ways.
+static const uint32_t CAMERA_LINK_BAUD = 460800;
 
 enum class CmdType : uint8_t {          // host -> robot
   MOVE            = 0x01,
@@ -45,6 +61,13 @@ enum class CmdType : uint8_t {          // host -> robot
                            // measurements; 6V off cuts the servos' power, torque off until a restart
   SERVO_REBOOT    = 0x0E,  // {slot: uint8, 1-8} - restart one servo (DYNAMIXEL Reboot), clearing its
                            // hardware error; the robot puts back its profile, gain and torque
+
+  // host or robot -> camera
+  CAM_STATUS_REQUEST = 0x20,  // no payload - answered with CAM_STATUS
+  CAM_WIFI_SET    = 0x21,  // {ssid_len: uint8, ssid, password_len: uint8, password} - the camera saves
+                           // this network and joins it, then answers with CAM_STATUS. Taken only on
+                           // the camera's own USB: the radio isn't encrypted, so a password never
+                           // crosses it - the camera ignores one that comes over the robot link
 };
 
 // Canonical direction ordering for GAIT_RUN's direction_id (0-11). Must
@@ -58,7 +81,27 @@ enum class ReplyType : uint8_t {        // robot -> host
   RECORD_DATA_REPLY = 0x82,  // retired alongside RECORD_SEND; kept reserved
   TELEMETRY_REPLY   = 0x83,  // one joint snapshot - see TelemetryPayload below
   SENSOR_REPLY      = 0x84,  // every detected sensor's reading - see SensorKind below
+
+  // camera -> host or robot
+  CAM_STATUS        = 0xA0,  // the camera's Wi-Fi - see CameraWifi below
 };
+
+// Payload of CAM_STATUS (little-endian):
+//   uint8   protocol   the camera's PROTOCOL_VERSION
+//   uint8   wifi       CameraWifi
+//   uint8   reason     why the last attempt to join failed (an ESP-IDF
+//                      wifi_err_reason_t, e.g. 201 network not found,
+//                      202 authentication failed), 0 if none since the last join
+//   int8    rssi       signal, dBm (0 unless connected)
+//   uint8   ip[4]      its address (0.0.0.0 unless connected)
+//   uint8   ssid_len   then that many bytes: the network it uses - never the password
+enum class CameraWifi : uint8_t {
+  NOT_SET    = 0,  // no network saved yet
+  CONNECTING = 1,
+  CONNECTED  = 2,
+  FAILED     = 3,  // couldn't join - see reason; it keeps trying
+};
+static const size_t CAM_STATUS_HEADER_LEN = 9;   // up to and including ssid_len
 
 // Payload of SENSOR_REPLY (little-endian, packed):
 //   uint32  t_ms     robot millis() when sampled
@@ -145,5 +188,44 @@ inline size_t buildFrame(uint8_t msgType, const uint8_t* payload, uint8_t payloa
   outBuf[3 + payloadLen + 1] = (crc >> 8) & 0xFF;
   return 3 + (size_t)payloadLen + 2;
 }
+
+// Total length of the frame at buf, from its LENGTH byte.
+inline size_t frameLen(const uint8_t* buf) {
+  return 3 + (size_t)buf[2] + FRAME_CRC_LEN;
+}
+
+// Collects frames from a byte stream such as a UART: feed() each byte as it
+// arrives, and when it returns true, frame() holds a whole CRC-checked frame.
+// A bad frame is dropped, and a frame left half-finished for FRAME_GAP_MS is
+// abandoned, so noise or a dropped byte can't wedge it - it just waits for
+// the next start byte.
+class FrameReader {
+ public:
+  static const uint32_t FRAME_GAP_MS = 50;
+
+  bool feed(uint8_t b) {
+    uint32_t now = millis();
+    if (_len && now - _lastByteMs > FRAME_GAP_MS) _len = 0;
+    _lastByteMs = now;
+    if (_len == 0 && b != FRAME_START) return false;
+    _buf[_len++] = b;
+    if (_len < 3 || _len < frameLen(_buf)) return false;
+    _len = 0;
+    uint8_t type; const uint8_t* payload; uint8_t payloadLen;
+    return parseFrameBuf(_buf, sizeof(_buf), &type, &payload, &payloadLen);
+  }
+
+  bool busy() const { return _len != 0; }   // partway through a frame
+  const uint8_t* frame() const { return _buf; }
+  size_t length() const { return frameLen(_buf); }
+  uint8_t type() const { return _buf[1]; }
+  const uint8_t* payload() const { return _buf + 3; }
+  uint8_t payloadLen() const { return _buf[2]; }
+
+ private:
+  uint8_t _buf[FRAME_MAX_LEN];
+  size_t _len = 0;
+  uint32_t _lastByteMs = 0;
+};
 
 #endif

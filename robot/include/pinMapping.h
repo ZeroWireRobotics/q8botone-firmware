@@ -19,3 +19,7 @@ const uint8_t BUCK_6V_ON     = LOW;
 
 // Pairing button (new PCB revision) - active low, long-press forces a re-pair
 const uint8_t BUTTON_PIN = 9;
+
+// Camera link (see cameraLink.h) - the schematic's TX1 / RX1
+const uint8_t CAMERA_TX_PIN = 2;    // IO2, to the camera's D7
+const uint8_t CAMERA_RX_PIN = 3;    // IO3, from the camera's D8

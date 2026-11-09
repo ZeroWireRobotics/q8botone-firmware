@@ -11,9 +11,12 @@ quadruped robot with no physical wires that fits in the palm of your hand. Curre
 
 - `robot/` - firmware for the robot
 - `controller/` - firmware for the handheld controller
+- `camera/` - firmware for the camera, which streams video over Wi-Fi and
+  talks to the robot over a UART
 
-Both are [PlatformIO](https://platformio.org/) projects for the Seeed Studio
-XIAO ESP32-C3. To build one, open its folder and run `pio run`. More detailed instructions can be found on PlatformIO's [website](https://platformio.org/).
+All three are [PlatformIO](https://platformio.org/) projects: the robot and
+the controller for the Seeed Studio XIAO ESP32-C3, the camera for the XIAO
+ESP32S3 Sense. To build one, open its folder and run `pio run`. More detailed instructions can be found on PlatformIO's [website](https://platformio.org/).
 
 ## Working with an AI coding assistant
 

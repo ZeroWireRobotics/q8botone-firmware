@@ -17,6 +17,7 @@
 #include "i2cBus.h"
 #include "sensors.h"
 #include "motorSetup.h"
+#include "cameraLink.h"
 
 // Initialize global objects
 esp_now_peer_info_t peerInfo;
@@ -59,17 +60,21 @@ volatile bool pairingAcceptingRequests = true;
 const uint8_t DEFAULT_LED_BRIGHTNESS = 128;
 
 // Joint telemetry (see protocol.h's TelemetryPayload). espnowRxTask only
-// raises the flag; gaitRunnerTask does the reading, so the servo bus keeps a
-// single owner and the read lands right after the gait write where it uses
-// slack rather than delaying a frame.
-volatile bool telemetryRequested = false;
+// marks who asked (MsgSource bits); gaitRunnerTask does the reading, so the
+// servo bus keeps a single owner and the read lands right after the gait
+// write where it uses slack rather than delaying a frame.
+volatile uint8_t telemetryRequestedBy = 0;
 uint32_t lastTelemetryRequestMs = 0;
 
 // Qwiic sensors (see sensors.h). espnowRxTask and the serial 's' command
 // only raise these; sensorTask does the I2C work, so neither the radio
 // task nor the small-stack serial task ever waits on the bus.
-volatile bool sensorsRequested = false;
+volatile uint8_t sensorsRequestedBy = 0;   // MsgSource bits
 volatile bool sensorsPrintRequested = false;
+// Serial v asks the camera for its status; handleCameraFrame() prints the
+// reply - the robot's end of the camera link, checked without a host.
+volatile bool cameraStatusToSerial = false;
+uint32_t cameraStatusAskedAt = 0;
 // Serial F starts a factory reset of the servos; Y within 5 s confirms it.
 // When F was typed, 0 if it was not. Only serialOutputTask touches it.
 uint32_t factoryResetAskedAt = 0;
@@ -124,6 +129,111 @@ bool addPeer(const uint8_t* mac) {
   peer.channel = chan;
   peer.encrypt = false;
   return esp_now_add_peer(&peer) == ESP_OK;
+}
+
+// Request flags owed to more than one asker (telemetryRequestedBy,
+// sensorsRequestedBy): set from espnowRxTask, taken by the task that answers.
+static portMUX_TYPE requestMux = portMUX_INITIALIZER_UNLOCKED;
+void markRequested(volatile uint8_t& by, uint8_t from) {
+  portENTER_CRITICAL(&requestMux);
+  by |= from;
+  portEXIT_CRITICAL(&requestMux);
+}
+uint8_t takeRequested(volatile uint8_t& by) {
+  portENTER_CRITICAL(&requestMux);
+  uint8_t was = by;
+  by = 0;
+  portEXIT_CRITICAL(&requestMux);
+  return was;
+}
+
+// Sends the reply frame already built in msg.data to whoever asked
+// (MsgSource bits): the host over the radio, if paired, and/or the camera.
+void sendReply(DataMessage& msg, uint8_t to) {
+  msg.msgType = DATA;
+  msg.id = 0;   // Server ID
+  if ((to & FROM_RADIO) && paired) {
+    esp_now_send(clientMac, (uint8_t*)&msg, sizeof(msg));
+  }
+  if (to & FROM_CAMERA) {
+    cameraLinkSend((const uint8_t*)msg.data, frameLen((const uint8_t*)msg.data));
+  }
+}
+
+// cameraLinkTask hands each of the camera's frames here, into rxQueue, so
+// espnowRxTask handles them along with the radio's - one task carries out
+// every command, whoever sent it.
+void queueCameraFrame(const uint8_t* frame, size_t len) {
+  static ESPNowMessage msg;   // only cameraLinkTask calls this
+  if (len > sizeof(msg.data)) return;
+  memcpy(msg.data, frame, len);
+  msg.len = len;
+  msg.timestamp = millis();
+  msg.source = FROM_CAMERA;
+  (void)xQueueSend(rxQueue, &msg, 0);
+}
+
+// Carries out a command for the robot - from the host or from the camera;
+// `from` (MsgSource) is where any reply goes.
+void runCommand(const uint8_t* frame, size_t capacity, uint8_t from) {
+  switch (q8.parseFrame(frame, capacity)) {
+    case 1: {
+      // Battery - percent is derived from this same VBAT reading (see
+      // battery.cpp's lookup table), so both halves of the reply come from
+      // one ADC sample rather than two that could disagree.
+      queuePrint(MSG_DEBUG, "[DATA] Send battery level\n");
+      uint8_t payload[3];
+      payload[0] = (uint8_t)batteryGetPercent();
+      uint16_t millivolts = (uint16_t)lroundf(batteryGetADC() * 1000.0f);
+      memcpy(payload + 1, &millivolts, sizeof(millivolts));
+      buildFrame((uint8_t)ReplyType::BATTERY_REPLY, payload, sizeof(payload), (uint8_t*)myMsg.data);
+      sendReply(myMsg, from);
+      break;
+    }
+    case 4:
+      // Joint telemetry - sampled and answered by gaitRunnerTask.
+      markRequested(telemetryRequestedBy, from);
+      lastTelemetryRequestMs = millis();
+      break;
+    case 5:
+      // Qwiic sensors - sampled and answered by sensorTask.
+      markRequested(sensorsRequestedBy, from);
+      break;
+  }
+}
+
+void printCameraStatus(const uint8_t* p, uint8_t len) {
+  if (len < CAM_STATUS_HEADER_LEN || len < CAM_STATUS_HEADER_LEN + p[8]) {
+    queuePrint(MSG_INFO, "[CAMERA] Status too short (%u bytes)\n", len);
+    return;
+  }
+  static const char* const STATES[] = {"no network set", "joining", "connected to", "can't join"};
+  char ssid[33];
+  size_t n = min((size_t)p[8], sizeof(ssid) - 1);
+  memcpy(ssid, p + CAM_STATUS_HEADER_LEN, n);
+  ssid[n] = 0;
+  queuePrint(MSG_INFO, "[CAMERA] Wi-Fi %s %s - %u.%u.%u.%u, %d dBm, last failure %u (camera protocol %u)\n",
+             p[1] < 4 ? STATES[p[1]] : "?", ssid, p[4], p[5], p[6], p[7], (int8_t)p[3], p[2], p[0]);
+}
+
+// A frame from the camera (rxQueue, source FROM_CAMERA): its replies go on to
+// the host; a command for the robot is carried out like the host's, its
+// reply going back to the camera.
+void handleCameraFrame(const uint8_t* frame, size_t len) {
+  uint8_t type = frame[1];
+  if (isCameraReply(type)) {
+    if (type == (uint8_t)ReplyType::CAM_STATUS && cameraStatusToSerial) {
+      cameraStatusToSerial = false;
+      printCameraStatus(frame + 3, frame[2]);
+    }
+    if (paired && len <= sizeof(myMsg.data)) {
+      memcpy(myMsg.data, frame, len);
+      sendReply(myMsg, FROM_RADIO);
+    }
+  } else if (isRobotCommand(type)) {
+    lastDataReceived = millis();
+    runCommand(frame, len, FROM_CAMERA);
+  }
 }
 
 // Serial '5' / '6' (see serialOutputTask): flip a buck by hand, for hardware
@@ -228,6 +338,7 @@ void onRecv(const uint8_t* mac, const uint8_t* data, int len) {
   memcpy(msg.data, data, len);
   msg.len = len;
   msg.timestamp = millis();
+  msg.source = FROM_RADIO;
 
   // Non-blocking send - drop message if queue is full
   (void)xQueueSend(rxQueue, &msg, 0);
@@ -247,6 +358,10 @@ void espnowRxTask(void* parameter) {
   while (true) {
     // Wait for messages from onRecv() callback (blocking)
     if (xQueueReceive(rxQueue, &msg, portMAX_DELAY) == pdTRUE) {
+      if (msg.source == FROM_CAMERA) {
+        handleCameraFrame(msg.data, msg.len);
+        continue;
+      }
       uint8_t msgType = msg.data[0];
 
       // Handle PAIRING message
@@ -302,46 +417,16 @@ void espnowRxTask(void* parameter) {
         lastHeartbeatReceived = millis();  // Any DATA also counts as "alive"
         lastDataReceived = millis();
         memcpy(&theirMsg, msg.data, sizeof(theirMsg));
-        uint8_t result = q8.parseFrame((uint8_t*)theirMsg.data, sizeof(theirMsg.data));
+        const uint8_t* frame = (const uint8_t*)theirMsg.data;
+        uint8_t type; const uint8_t* payload; uint8_t payloadLen;
+        if (!parseFrameBuf(frame, sizeof(theirMsg.data), &type, &payload, &payloadLen)) continue;
 
-        // myMsg params
-        myMsg.id = 0;  // Server ID
-
-        if (result == 0) {
-          // No special instruction
-          continue;
+        if (isCameraCommand(type)) {
+          // For the camera: pass it on. Its reply comes back through
+          // handleCameraFrame().
+          cameraLinkSend(frame, frameLen(frame));
         } else {
-          // Controller requests battery level or data
-          switch (result) {
-            case 4: {
-              // Joint telemetry - sampled and answered by gaitRunnerTask.
-              telemetryRequested = true;
-              lastTelemetryRequestMs = millis();
-              break;
-            }
-            case 5: {
-              // Qwiic sensors - sampled and answered by sensorTask.
-              sensorsRequested = true;
-              break;
-            }
-
-            case 1: {
-              // Send battery level
-              queuePrint(MSG_DEBUG, "[DATA] Send battery level\n");
-              // Percent is derived from this same VBAT reading (see
-              // battery.cpp's lookup table), so both halves of the reply come
-              // from one ADC sample rather than two that could disagree.
-              uint8_t payload[3];
-              payload[0] = (uint8_t)batteryGetPercent();
-              uint16_t millivolts = (uint16_t)lroundf(batteryGetADC() * 1000.0f);
-              memcpy(payload + 1, &millivolts, sizeof(millivolts));
-              buildFrame((uint8_t)ReplyType::BATTERY_REPLY, payload, sizeof(payload),
-                         (uint8_t*)myMsg.data);
-              esp_now_send(clientMac, (uint8_t*)&myMsg, sizeof(myMsg));
-              break;
-            }
-
-          }
+          runCommand(frame, sizeof(theirMsg.data), FROM_RADIO);
         }
       }
     }
@@ -670,6 +755,13 @@ void serialOutputTask(void* parameter) {
         toggleRail(rail6V, "6V");
       } else if (c == 's') {
         sensorsPrintRequested = true;   // see sensorTask
+      } else if (c == 'v') {
+        static const uint8_t none = 0;
+        uint8_t frame[FRAME_OVERHEAD];
+        buildFrame((uint8_t)CmdType::CAM_STATUS_REQUEST, &none, 0, frame);
+        cameraStatusToSerial = true;   // see handleCameraFrame
+        cameraStatusAskedAt = millis();
+        cameraLinkSend(frame, sizeof(frame));
       } else if (c == 'm') {
         q8.lockBus();                        // the scan has the bus to itself
         motorSetupScan(q8dxl, printLineNow);
@@ -703,6 +795,10 @@ void serialOutputTask(void* parameter) {
         }
         q8.unlockBus();   // nothing was reset - carry on
       }
+    }
+    if (cameraStatusToSerial && millis() - cameraStatusAskedAt > 500) {
+      cameraStatusToSerial = false;
+      queuePrint(MSG_INFO, "[CAMERA] No answer - is the camera on, and wired TX1 -> D7, RX1 <- D8?\n");
     }
 
     // Low priority - yield to other tasks
@@ -755,20 +851,16 @@ void gaitRunnerTask(void* parameter) {
     }
     q8.serviceReturn(nowMs);   // a servo that eased back after a restart: its usual profile again
 
-    if (telemetryRequested) {
-      telemetryRequested = false;
-      if (paired && q8.readJointState(telemetry)) {
-        memcpy(telemetry.temperature, cachedTemperature, sizeof(cachedTemperature));
-        memcpy(telemetry.voltage, cachedVoltage, sizeof(cachedVoltage));
-        memcpy(telemetry.hwError, cachedHwError, sizeof(cachedHwError));
-        memcpy(telemetry.restored, cachedRestored, sizeof(cachedRestored));
-        telemetryMsg.msgType = DATA;
-        telemetryMsg.id = 0;
-        buildFrame((uint8_t)ReplyType::TELEMETRY_REPLY,
-                   (const uint8_t*)&telemetry, sizeof(telemetry),
-                   (uint8_t*)telemetryMsg.data);
-        esp_now_send(clientMac, (uint8_t*)&telemetryMsg, sizeof(telemetryMsg));
-      }
+    uint8_t telemetryTo = takeRequested(telemetryRequestedBy);
+    if (telemetryTo && q8.readJointState(telemetry)) {
+      memcpy(telemetry.temperature, cachedTemperature, sizeof(cachedTemperature));
+      memcpy(telemetry.voltage, cachedVoltage, sizeof(cachedVoltage));
+      memcpy(telemetry.hwError, cachedHwError, sizeof(cachedHwError));
+      memcpy(telemetry.restored, cachedRestored, sizeof(cachedRestored));
+      buildFrame((uint8_t)ReplyType::TELEMETRY_REPLY,
+                 (const uint8_t*)&telemetry, sizeof(telemetry),
+                 (uint8_t*)telemetryMsg.data);
+      sendReply(telemetryMsg, telemetryTo);
     }
 
     // If something long ran between ticks - a jump, a greet, or simply this
@@ -797,16 +889,12 @@ void sensorTask(void* parameter) {
   static uint8_t payload[sizeof(sensorMsg.data) - FRAME_OVERHEAD];
 
   while (true) {
-    if (sensorsRequested) {
-      sensorsRequested = false;
-      if (paired) {
-        size_t len = sensorsBuildReply(payload, sizeof(payload));
-        sensorMsg.msgType = DATA;
-        sensorMsg.id = 0;
-        buildFrame((uint8_t)ReplyType::SENSOR_REPLY, payload, (uint8_t)len,
-                   (uint8_t*)sensorMsg.data);
-        esp_now_send(clientMac, (uint8_t*)&sensorMsg, sizeof(sensorMsg));
-      }
+    uint8_t sensorsTo = takeRequested(sensorsRequestedBy);
+    if (sensorsTo) {
+      size_t len = sensorsBuildReply(payload, sizeof(payload));
+      buildFrame((uint8_t)ReplyType::SENSOR_REPLY, payload, (uint8_t)len,
+                 (uint8_t*)sensorMsg.data);
+      sendReply(sensorMsg, sensorsTo);
     }
     if (sensorsPrintRequested) {
       sensorsPrintRequested = false;
@@ -1030,6 +1118,22 @@ void setup() {
   );
   if (taskCreated != pdPASS) {
     Serial.println("[RTOS] Failed to create gait runner task");
+    initSuccess = false;
+  }
+
+  // Camera link (see cameraLink.h) - its frames go into rxQueue like the
+  // radio's (see queueCameraFrame).
+  cameraLinkBegin();
+  taskCreated = xTaskCreate(
+    cameraLinkTask,     // Task function
+    "CameraLink",       // Task name
+    2048,               // Stack size (bytes)
+    (void*)queueCameraFrame,  // what to do with each frame
+    2,                  // Priority (medium - it only reads bytes and queues them)
+    NULL                // Task handle
+  );
+  if (taskCreated != pdPASS) {
+    Serial.println("[RTOS] Failed to create camera link task");
     initSuccess = false;
   }
 

@@ -1,7 +1,7 @@
 '''
 Written by yufeng.wu0902@gmail.com
 
-PlatformIO extra script, shared by robot/ and controller/ (see
+PlatformIO extra script, shared by robot/, controller/ and camera/ (see
 extra_scripts in their platformio.ini): stamps the firmware version into the
 build as Q8BOT_FW_VERSION, which main.cpp appends to FIRMWARE_ID.
 
@@ -14,7 +14,7 @@ version is ever written down. Tag a release vX.Y.Z and builds report:
     0.0.0-gabc1234            no release tag reachable yet
     unknown                   not built from a git checkout
 
-Robot and controller share this repo, so they share one version line.
+Robot, controller and camera share this repo, so they share one version line.
 
 Only the project's own sources get the define (projenv, not env), so a new
 version recompiles src/ but not the Arduino core or the libraries.

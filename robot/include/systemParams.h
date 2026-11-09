@@ -72,12 +72,20 @@ enum RobotState : uint8_t {
 
 extern volatile RobotState robotState;
 
+// Where a command came from, so its reply goes back the same way. Bits, so
+// a reply owed to both (two requests before one answer) reaches both.
+enum MsgSource : uint8_t {
+  FROM_RADIO  = 1 << 0,   // the controller (and the host behind it), over ESP-NOW
+  FROM_CAMERA = 1 << 1,   // the camera, over its UART link (see cameraLink.h)
+};
+
 // FreeRTOS Message Structures
 struct ESPNowMessage {
   uint8_t mac[6];
-  uint8_t data[250];
+  uint8_t data[250];   // from the camera: just the frame
   int len;
   uint32_t timestamp;
+  uint8_t source;      // MsgSource
 };
 
 enum SerialMsgType : uint8_t {
